@@ -1,0 +1,13 @@
+build
+log
+install
+.vscode
+__pycache__
+.env
+IsaacSim-ros_workspaces/
+envs
+IsaacLab-0.3.1
+IsaacLab-1.0.0
+logs/rsl_rl/unitree_go2_stairs
+train_stairs_logs/
+env/
