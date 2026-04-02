@@ -10,4 +10,7 @@ IsaacLab-0.3.1
 IsaacLab-1.0.0
 logs/rsl_rl/unitree_go2_stairs
 train_stairs_logs/
-env/
+env
+.codex
+.claude
+go2_rl_gym
