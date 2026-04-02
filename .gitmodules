@@ -1,3 +1,6 @@
 [submodule "IsaacSim-ros_workspaces"]
 	path = IsaacSim-ros_workspaces
 	url = https://github.com/NVIDIA-Omniverse/IsaacSim-ros_workspaces
+[submodule "go2_rl_gy,"]
+	path = go2_rl_gym
+	url = https://github.com/wty-yy/go2_rl_gym
