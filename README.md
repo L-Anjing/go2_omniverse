@@ -2,6 +2,7 @@
 
 
 # Welcome to the Unitree Go2/G1 Digital Twins Project!
+forked from https://github.com/abizovnuralem/go2_omniverse/tree/added_copter  
 
 [![IsaacSim](https://img.shields.io/badge/IsaacSim-4.5.0-silver.svg)](https://docs.omniverse.nvidia.com/isaacsim/latest/overview.html)
 [![Python](https://img.shields.io/badge/python-3.10-blue.svg)](https://docs.python.org/3/whatsnew/3.10.html)
@@ -88,6 +89,30 @@ Get ready to take your research to the next level with this powerful new resourc
 10. Bunch of RL-envs for custom dog training :white_check_mark:
 11. Custom numbers of robots :white_check_mark:
 12. Added G1 Unitree support :white_check_mark:
+13. Point-LIO + Unitree L1 lidar mapping support :white_check_mark:
+14. Semantic segmentation ROS2 topic support :white_check_mark:
+15. RL stair-climbing training scripts for robot dog :white_check_mark:
+16. Isaac Sim Hospital asset scene import support :white_check_mark:
+
+## New features in this fork
+
+- Point-LIO integrated with Unitree L1 lidar for mapping workflow.
+- Semantic segmentation topic added to ROS2 pipeline.
+- Stair-climbing RL training pipeline added (for robot dog locomotion).
+- Isaac Sim Hospital scene import added as a custom environment.
+
+## Hospital scene path configuration (required)
+
+The Hospital environment uses a local Isaac Sim assets path. Before running:
+
+1. Open [omniverse_sim.py](omniverse_sim.py#L309).
+2. Find `if args_cli.custom_env == "hospital":` and update `HOSPITAL_USD` to your local asset path.
+
+Current default in repo:
+
+`/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5/Isaac/Environments/Hospital/hospital.usd`
+
+If your assets are in another location, replace only this string and keep the filename `hospital.usd`.
 
 ## Your feedback and support mean the world to us. 
 
@@ -121,14 +146,8 @@ Some suggestions:
 To start with the local development environment, clone this repo:
 
 ```
-git clone https://github.com/abizovnuralem/go2_omniverse/ --recurse-submodules -j8 --depth=1
-
+git clone https://github.com/L-Anjing/go2_omniverse/ --recurse-submodules -j8 --depth=1
 ```
-For the branch *added_copter*:
-```
-git clone -b added_copter https://github.com/abizovnuralem/go2_omniverse/ --recurse-submodules -j8 --depth=1
-```
-
 
 
 ## Setup the Unitree L1 Lidar:
@@ -141,7 +160,7 @@ You can do this with ```conda info --envs```
 
 2. Replace original file that located in ```<your conda env dir>/lib/python3.10/site-packages/isaacsim/exts/isaacsim.sensors.rtx/config/extension.toml``` with ```Isaac_sim/extension.toml``` in this repo.
 
-3. You need to add Unitree_L1.json to Isaac Lab repo folder. The final directory should be (if it doesn't exist, create it): ```<your conda env dir>/lib/python3.10/site-packages/isaacsim/exts/isaacsim.sensors.rtx/data/lidar_configs/Unitree/Unitree_L1.json``` 
+3. You need to add Unitree_L1.json to Isaac Lab repo folder. The final directory should be (if it doesn't exist, create it): ```<your conda env dir>/lib/python3.10/site-packages/isaacsim/exts/isaacsim.sensors.rtx/data/lidar_configs/Unitree_L1.json``` 
 
 
 ## Usage
@@ -158,7 +177,11 @@ To start the project with Unitree G1, execute:
 ./run_sim_g1.sh
 ```
 
-You can control the dog using "WASD" keyboard commands
+To train a stair-climbing model:  
+```
+./run_train_stairs.sh
+```
+* Note: The script is set up for dual-GPU training by default. Adjust it based on your hardware if necessary.
 
 ## ROS2 SDK
 

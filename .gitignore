@@ -9,3 +9,6 @@ train_stairs_logs/
 env
 .codex
 .claude
+.codex
+revise.md
+train_stairs.md
