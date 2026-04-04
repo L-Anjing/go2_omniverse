@@ -1,7 +1,7 @@
 # go2_omniverse
 
 **Forked from https://github.com/abizovnuralem/go2_omniverse**  
-
+具体部署步骤参见原仓库，本仓库在原仓库基础上进行修改，适配个人工程需要。  
 本仓库具有 **Isaac Lab / Omniverse 里的 Go2 仿真、低层 RL 推理和训练**。  
 
 
@@ -11,8 +11,8 @@
 - Go2 / G1 在 Isaac Lab 中的实时平衡与 locomotion 推理
 - 键盘实时控制
 - ROS2 实时控制接口
-- RTX LiDAR、IMU、相机、语义分割话题发布
-- Unitree L1 LiDAR 接入
+- RTX LiDAR、IMU、**相机**、**语义分割** 话题发布 
+- Unitree L1 LiDAR 接入，适配PointLio算法
 - hospital / office / warehouse 等自定义场景加载
 - 楼梯 locomotion 训练脚本与 checkpoint 推理
 
@@ -31,9 +31,7 @@
 Hospital 场景使用本地 Isaac Sim 资产路径。  
 如果你的机器路径不同，需要修改 [omniverse_sim.py](go2_omniverse/omniverse_sim.py) 里 `HOSPITAL_USD` 的实际位置。
 
-当前默认路径是：
-
-`/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5/Isaac/Environments/Hospital/hospital.usd`
+当前默认路径是是本人的绝对路径！！！
 
 ## 主要入口
 
@@ -186,8 +184,8 @@ python train_stairs.py --headless --num_envs 4096 --max_iterations 15000
 
 训练日志默认在：
 
-- `train_stairs_logs/`
-- `logs/rsl_rl/`
+- `train_stairs_logs/`可以实时查看`Reward`
+- `logs/rsl_rl/`权重文件保存
 
 ## 这层最常见的问题
 
