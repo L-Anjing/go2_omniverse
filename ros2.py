@@ -27,8 +27,8 @@ import numpy as np
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
 from sensor_msgs.msg import JointState
-from geometry_msgs.msg import TransformStamped, Vector3, Quaternion
-from tf2_ros import TransformBroadcaster
+from geometry_msgs.msg import TransformStamped, Twist, Vector3, Quaternion
+from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 from go2_interfaces.msg import Go2State
 from std_msgs.msg import Header
 
@@ -189,7 +189,7 @@ def add_copter_camera():
 
     Camera(cameraCfg)
 
-def pub_robo_data_ros2(robot_type, num_envs, base_node, env, annotator_lst):
+def pub_robo_data_ros2(robot_type, num_envs, base_node, env, annotator_lst, base_commands=None):
     # Single timestamp for the entire frame so TF and all sensor messages
     # are consistent — prevents RViz2 from extrapolating transforms.
     stamp = base_node.get_clock().now().to_msg()
@@ -204,9 +204,13 @@ def pub_robo_data_ros2(robot_type, num_envs, base_node, env, annotator_lst):
         base_node.publish_odom(
             env.unwrapped.scene["robot"].data.root_state_w[i, :3],
             env.unwrapped.scene["robot"].data.root_state_w[i, 3:7],
+            env.unwrapped.scene["robot"].data.root_lin_vel_b[i],
             i,
             stamp,
         )
+        if base_commands is not None:
+            cmd = base_commands.get(str(i), [0.0, 0.0, 0.0])
+            base_node.publish_cmd(cmd, i, stamp)
         base_node.publish_imu(
             env.unwrapped.scene["robot"].data.root_state_w[i, 3:7],
             env.unwrapped.scene["robot"].data.projected_gravity_b[i, :],
@@ -270,6 +274,35 @@ class RobotBaseNode(Node):
                 )
             )
         self.broadcaster = TransformBroadcaster(self, qos=qos_profile)
+        self.static_broadcaster = StaticTransformBroadcaster(self)
+
+        # Driving command publishers — one per environment
+        self.cmd_pub = []
+        for i in range(num_envs):
+            self.cmd_pub.append(
+                self.create_publisher(Twist, f"robot{i}/base_command", qos_profile)
+            )
+
+        # Broadcast fixed camera frame TF once (base_link → front_cam).
+        # Parameters from CameraCfg.OffsetCfg: pos=(0.32487,-0.00095,0.05362)
+        # rot=(w=0.5, x=-0.5, y=0.5, z=-0.5) in ROS convention.
+        # This TF is per-robot but the offset is identical for all envs.
+        static_tfs = []
+        for i in range(num_envs):
+            cam_tf = TransformStamped()
+            cam_tf.header.stamp = self.get_clock().now().to_msg()
+            cam_tf.header.frame_id = f"robot{i}/base_link"
+            cam_tf.child_frame_id = f"robot{i}/front_cam"
+            cam_tf.transform.translation.x = 0.32487
+            cam_tf.transform.translation.y = -0.00095
+            cam_tf.transform.translation.z = 0.05362
+            # geometry_msgs/Quaternion uses (x,y,z,w)
+            cam_tf.transform.rotation.x = -0.5
+            cam_tf.transform.rotation.y = 0.5
+            cam_tf.transform.rotation.z = -0.5
+            cam_tf.transform.rotation.w = 0.5
+            static_tfs.append(cam_tf)
+        self.static_broadcaster.sendTransform(static_tfs)
 
     def publish_joints(self, joint_names_lst, joint_state_lst, robot_num, stamp):
         joint_state = JointState()
@@ -287,7 +320,7 @@ class RobotBaseNode(Node):
         joint_state.position = joint_state_formated
         self.joint_pub[robot_num].publish(joint_state)
 
-    def publish_odom(self, base_pos, base_rot, robot_num, stamp):
+    def publish_odom(self, base_pos, base_rot, base_lin_vel_b, robot_num, stamp):
         now = stamp
 
         odom_trans = TransformStamped()
@@ -330,8 +363,12 @@ class RobotBaseNode(Node):
         odom_topic.pose.pose.orientation.y = base_rot[2].item()
         odom_topic.pose.pose.orientation.z = base_rot[3].item()
         odom_topic.pose.pose.orientation.w = base_rot[0].item()
+        # Linear velocity in body frame (vx = forward speed = ego_speed)
+        odom_topic.twist.twist.linear.x = base_lin_vel_b[0].item()
+        odom_topic.twist.twist.linear.y = base_lin_vel_b[1].item()
+        odom_topic.twist.twist.linear.z = base_lin_vel_b[2].item()
         self.odom_pub[robot_num].publish(odom_topic)
-        
+
     def publish_imu(self, base_rot, gravity_b, base_ang_vel, robot_num, stamp):
         imu_trans = Imu()
         imu_trans.header.stamp = stamp
@@ -356,6 +393,18 @@ class RobotBaseNode(Node):
         imu_trans.orientation.w = base_rot[0].item()
 
         self.imu_pub[robot_num].publish(imu_trans)
+
+    def publish_cmd(self, base_cmd, robot_num, stamp):
+        """Publish the current high-level velocity command [vx, vy, wz] as Twist.
+
+        Topic: robot{N}/base_command  (geometry_msgs/Twist)
+        This is recorded by the data collector as 'driving_command'.
+        """
+        twist = Twist()
+        twist.linear.x = float(base_cmd[0])
+        twist.linear.y = float(base_cmd[1])
+        twist.angular.z = float(base_cmd[2])
+        self.cmd_pub[robot_num].publish(twist)
 
     def publish_robot_state(self, foot_force_lst, robot_num):
 

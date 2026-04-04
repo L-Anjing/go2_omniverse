@@ -68,6 +68,16 @@ parser.add_argument("--robot", type=str, default="go2", help="Setup the robot")
 parser.add_argument(
     "--robot_amount", type=int, default=1, help="Setup the robot amount"
 )
+parser.add_argument(
+    "--cmd_source",
+    type=str,
+    choices=("keyboard", "ros2"),
+    default="keyboard",
+    help=(
+        "Select who writes high-level base commands: "
+        "'keyboard' for manual teleop, 'ros2' for /robot{N}/cmd_vel subscribers."
+    ),
+)
 
 
 # append RSL-RL cli arguments
@@ -359,12 +369,13 @@ def specify_cmd_for_robots(numv_envs):
 
 
 def run_sim():
-
-    # acquire input interface
-    _input = carb.input.acquire_input_interface()
-    _appwindow = omni.appwindow.get_default_app_window()
-    _keyboard = _appwindow.get_keyboard()
-    _sub_keyboard = _input.subscribe_to_keyboard_events(_keyboard, sub_keyboard_event)
+    if args_cli.cmd_source == "keyboard":
+        # Only subscribe to keyboard teleop in manual mode so it never races
+        # with the navigation stack over the same base_command buffer.
+        _input = carb.input.acquire_input_interface()
+        _appwindow = omni.appwindow.get_default_app_window()
+        _keyboard = _appwindow.get_keyboard()
+        _input.subscribe_to_keyboard_events(_keyboard, sub_keyboard_event)
 
     """Play with RSL-RL agent."""
     # parse configuration
@@ -462,7 +473,11 @@ def run_sim():
     # initialize ROS2 node
     rclpy.init()
     base_node = RobotBaseNode(env_cfg.scene.num_envs)
-    add_cmd_sub(env_cfg.scene.num_envs)
+    if args_cli.cmd_source == "ros2":
+        add_cmd_sub(env_cfg.scene.num_envs)
+        print("[INFO] Command source: ROS2 (/robot{i}/cmd_vel -> base_command)")
+    else:
+        print("[INFO] Command source: keyboard (W/S/A/D/Q/E)")
 
     # Attach sensors and create render products AFTER the full scene
     # (including custom env) is on stage, but before the first obs step.
@@ -497,6 +512,7 @@ def run_sim():
                 base_node,
                 env,
                 annotator_lst,
+                base_commands=custom_rl_env.base_command,
             )
             # move_copter(copter)
 

@@ -17,11 +17,11 @@
 # Stop:
 #   kill $(cat train_stairs_logs/train_gpu0.pid) $(cat train_stairs_logs/train_gpu1.pid)
 
-NUM_ENVS=${1:-4096}
+NUM_ENVS=${1:-3072}
 MAX_ITER=${2:-15000}
 # 从零开始训练
-# CHECKPOINT="${CHECKPOINT:-}"
-CHECKPOINT="${CHECKPOINT:-/media/user/data1/carl/workspace/go2_omniverse/logs/rsl_rl/unitree_go2_stairs/model_1800.pt}"
+CHECKPOINT="${CHECKPOINT:-}"
+#CHECKPOINT="${CHECKPOINT:-/media/user/data1/carl/workspace/go2_omniverse/logs/rsl_rl/unitree_go2_stairs/model_1800.pt}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 

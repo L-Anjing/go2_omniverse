@@ -40,7 +40,8 @@ conda activate env_isaaclab
 
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-unitree_go2_stairs}"
 LOAD_RUN="${LOAD_RUN:-.*}"
-CHECKPOINT="${CHECKPOINT:-model_12000.pt}"
+CHECKPOINT="${CHECKPOINT:-model_9200.pt}"
+CMD_SOURCE="${CMD_SOURCE:-keyboard}"
 
 # Run the Python script
 python main.py \
@@ -49,6 +50,7 @@ python main.py \
   --device cuda \
   --enable_cameras \
   --custom_env hospital \
+  --cmd_source "${CMD_SOURCE}" \
   --experiment_name "${EXPERIMENT_NAME}" \
   --load_run "${LOAD_RUN}" \
   --checkpoint "${CHECKPOINT}"

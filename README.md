@@ -1,218 +1,210 @@
-![Digital Twins](https://github.com/abizovnuralem/go2_ros2_sdk/assets/33475993/ddbe30ab-21d1-46fd-b44b-198efba92771)
+# go2_omniverse
+
+**Forked from https://github.com/abizovnuralem/go2_omniverse**  
+
+本仓库具有 **Isaac Lab / Omniverse 里的 Go2 仿真、低层 RL 推理和训练**。  
 
 
-# Welcome to the Unitree Go2/G1 Digital Twins Project!
-forked from https://github.com/abizovnuralem/go2_omniverse/tree/added_copter  
-
-[![IsaacSim](https://img.shields.io/badge/IsaacSim-4.5.0-silver.svg)](https://docs.omniverse.nvidia.com/isaacsim/latest/overview.html)
-[![Python](https://img.shields.io/badge/python-3.10-blue.svg)](https://docs.python.org/3/whatsnew/3.10.html)
-[![Linux platform](https://img.shields.io/badge/platform-linux--64-orange.svg)](https://releases.ubuntu.com/22.04/)
-[![License](https://img.shields.io/badge/license-BSD--2-yellow.svg)](https://opensource.org/licenses/BSD-2-Clause)
-
-We are thrilled to announce that the Unitree Go2/G1 robot has now been integrated with the Nvidia Isaac Sim 4.5.0 (Isaac Lab), marking a major step forward in robotics research and development. The combination of these two cutting-edge technologies opens up a world of possibilities for creating and testing algorithms in a variety of simulated environments.
-
-Get ready to take your research to the next level with this powerful new resource at your fingertips!
+## 这个仓库目前已经具备的效果
 
 
-## Real time Go2 Balancing:
-
-<p align="center">
-<img width="1280" height="600" src="https://github.com/abizovnuralem/go2_omniverse/assets/33475993/60c2233a-7586-49b6-a134-a7bddc4dd9ae" alt='Go2'>
-</p>
-
-
-## Real time G1 Balancing:
-
-<p align="center">
-<img width="1280" height="600" src="https://github.com/abizovnuralem/go2_omniverse/assets/33475993/d035f72a-8996-461c-a902-38e68052d029" alt='Go2'>
-</p>
+- Go2 / G1 在 Isaac Lab 中的实时平衡与 locomotion 推理
+- 键盘实时控制
+- ROS2 实时控制接口
+- RTX LiDAR、IMU、相机、语义分割话题发布
+- Unitree L1 LiDAR 接入
+- hospital / office / warehouse 等自定义场景加载
+- 楼梯 locomotion 训练脚本与 checkpoint 推理
 
 
-## Go2 Ros2 Camera stream:
+## 这个仓库负责什么
 
-<p align="center">
-<img width="1200" height="440" src="https://github.com/abizovnuralem/go2_omniverse/assets/33475993/c740147b-ce00-4d7c-94de-0140be135e3e" alt='Go2'>
-</p>
-
-
-## URDF real-time joints sync:
-
-<p align="center">
-<img width="1200" height="440" src="https://github.com/abizovnuralem/go2_omniverse/assets/33475993/a8060b6e-e9b7-4d30-89f2-8a50b7510a2b" alt='Go2'>
-</p>
-
-## Foot force data stream:
-
-<p align="center">
-<img width="1200" height="440" src="https://github.com/abizovnuralem/go2_omniverse/assets/33475993/95a34b03-471e-496a-88cc-38e7c4e1906d" alt='Go2'>
-</p>
+- 在 Isaac Lab 中加载 Go2 / G1 机器人和 hospital 等场景
+- 运行 RSL-RL checkpoint 做低层 locomotion 控制
+- 发布 ROS2 传感器和状态话题
+- 接收 `robot0/cmd_vel` 作为高层速度命令
+- 提供从零训练和楼梯训练脚本
 
 
-## Real-time RTX lidar stream:
+### Hospital 资产路径
 
-<p align="center">
-<img width="1200" height="440" src="https://github.com/abizovnuralem/go2_omniverse/assets/33475993/3f078bf2-e4b6-45ca-8807-36537a4125b5" alt='Go2'>
-</p>
+Hospital 场景使用本地 Isaac Sim 资产路径。  
+如果你的机器路径不同，需要修改 [omniverse_sim.py](go2_omniverse/omniverse_sim.py) 里 `HOSPITAL_USD` 的实际位置。
 
-
-## Custom envs (Office):
-
-<p align="center">
-<img width="1200" height="440" src="https://github.com/abizovnuralem/go2_omniverse/assets/33475993/e2e9bdd0-1f40-41a8-86bc-c1097ab3fd7b" alt='Go2'>
-</p>
-
-
-## Custom envs (Warehouse):
-
-<p align="center">
-<img width="1200" height="440" src="https://github.com/abizovnuralem/go2_omniverse/assets/33475993/5db6f331-60be-40bd-9b4b-ead44064ee44" alt='Go2'>
-</p>
-
-
-## VR support:
-
-<p align="center">
-<img width="1200" height="440" src="https://github.com/abizovnuralem/go2_omniverse/assets/33475993/d5b82fac-d945-4462-8b3d-4026456847f4" alt='Go2'>
-</p>
-
-
-## Project RoadMap:
-1. PPO balancing algorithm :white_check_mark: 
-2. Keyboard real time control :white_check_mark: 
-3. Camera stream to ROS2 :white_check_mark: 
-4. RTX Lidar stream to ROS2 :white_check_mark:
-5. IMU data stream to ROS2 :white_check_mark: 
-6. URDF real-time joints sync :white_check_mark:
-7. Foot force data stream :white_check_mark:
-8. Real-time control from ROS2 :white_check_mark:
-9. Nav2 with Slam_toolbox :white_check_mark:
-10. Bunch of RL-envs for custom dog training :white_check_mark:
-11. Custom numbers of robots :white_check_mark:
-12. Added G1 Unitree support :white_check_mark:
-13. Point-LIO + Unitree L1 lidar mapping support :white_check_mark:
-14. Semantic segmentation ROS2 topic support :white_check_mark:
-15. RL stair-climbing training scripts for robot dog :white_check_mark:
-16. Isaac Sim Hospital asset scene import support :white_check_mark:
-
-## New features in this fork
-
-- Point-LIO integrated with Unitree L1 lidar for mapping workflow.
-- Semantic segmentation topic added to ROS2 pipeline.
-- Stair-climbing RL training pipeline added (for robot dog locomotion).
-- Isaac Sim Hospital scene import added as a custom environment.
-
-## Hospital scene path configuration (required)
-
-The Hospital environment uses a local Isaac Sim assets path. Before running:
-
-1. Open [omniverse_sim.py](omniverse_sim.py#L309).
-2. Find `if args_cli.custom_env == "hospital":` and update `HOSPITAL_USD` to your local asset path.
-
-Current default in repo:
+当前默认路径是：
 
 `/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5/Isaac/Environments/Hospital/hospital.usd`
 
-If your assets are in another location, replace only this string and keep the filename `hospital.usd`.
+## 主要入口
 
-## Your feedback and support mean the world to us. 
+- [omniverse_sim.py](go2_omniverse/omniverse_sim.py)
+  仿真主入口。创建 Isaac Lab 环境、加载 checkpoint、执行 `policy(obs) -> env.step(actions)`，并发布 ROS2 话题。
+- [run_sim.sh](go2_omniverse/run_sim.sh)
+  常用运行脚本。
+- [train_stairs.py](go2_omniverse/train_stairs.py)
+  楼梯 locomotion 训练入口。
+- [run_train_stairs.sh](go2_omniverse/run_train_stairs.sh)
+  训练启动脚本。
+- [ros2.py](go2_omniverse/ros2.py)
+  ROS2 发布接口，负责 odom、imu、lidar、camera、base_command 等话题。
 
-If you're as enthusiastic about this project as we are, please consider giving it a :star: star on our GitHub repository. 
+## 快速部署与启动
 
-Your encouragement fuels our passion and helps us develop our RoadMap further. We welcome any help or suggestions you can offer!
+### 1. Go2 仿真推理
 
-Together, let's push the boundaries of what's possible with the Unitree Go2/G1 and ROS2!
+最常用的启动方式：
 
-
-## System requirements
-You need to install:
-1. Ubuntu 22.04
-2. Nvidia Isaac Sim 4.5.0
-3. Nvidia Isaac Lab
-4. Ros2 Humble
-
-
-Full instruction:
-```
-https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/pip_installation.html
-```
-
-Some suggestions:
-1. You need to check nvidia-smi, it should work, before installing Isaac Sim 4.5.0
-2. You need to install Miniconda and execute: conda config --set auto_activate_base false
-3. Isaac Sim 4.5.0 and Isaac Lab installation via *pip* in a virtual enviroment is recommended
-
-## Downloading the code
-
-To start with the local development environment, clone this repo:
-
-```
-git clone https://github.com/L-Anjing/go2_omniverse/ --recurse-submodules -j8 --depth=1
+```bash
+cd go2_omniverse
+bash run_sim.sh
 ```
 
+这会走 [run_sim.sh](go2_omniverse/run_sim.sh)，默认加载当前脚本里配置的实验名、checkpoint 和 `CMD_SOURCE`。
 
-## Setup the Unitree L1 Lidar:
+### 2. G1 仿真推理
 
-First, you need to copy files from Isaac Sim folder to your local Isaac Sim installation in order to use Unitree L1 lidar inside Isaac Lab.
+如果你保留了对应脚本，也可以单独启动 G1：
 
-
-1. First check the directory of the virtual environment where Isaac Sim was installed. 
-You can do this with ```conda info --envs```
-
-2. Replace original file that located in ```<your conda env dir>/lib/python3.10/site-packages/isaacsim/exts/isaacsim.sensors.rtx/config/extension.toml``` with ```Isaac_sim/extension.toml``` in this repo.
-
-3. You need to add Unitree_L1.json to Isaac Lab repo folder. The final directory should be (if it doesn't exist, create it): ```<your conda env dir>/lib/python3.10/site-packages/isaacsim/exts/isaacsim.sensors.rtx/data/lidar_configs/Unitree_L1.json``` 
-
-
-## Usage
-The current project was tested on Ubuntu 22.04, Isaac Sim 4.5.0 with Isaac Lab and Nvidia Driver Version: 545.
-To start the project with Unitree GO2, execute:
-
-```
-./run_sim.sh
+```bash
+cd go2_omniverse
+bash run_sim_g1.sh
 ```
 
-To start the project with Unitree G1, execute:
+### 3. 楼梯训练
 
+```bash
+cd go2_omniverse
+bash run_train_stairs.sh
 ```
-./run_sim_g1.sh
+
+### 4. 直接指定模型与控制源
+
+例如：
+
+```bash
+EXPERIMENT_NAME=unitree_go2_rough \
+CHECKPOINT=model_7850.pt \
+CMD_SOURCE=ros2 \
+bash run_sim.sh
 ```
 
-To train a stair-climbing model:  
+## 运行模式
+
+### 1. 键盘遥控模式
+
+适合手动探索、录传感器流、辅助建图。
+
+```bash
+cd go2_omniverse
+CMD_SOURCE=keyboard bash run_sim.sh
 ```
-./run_train_stairs.sh
+
+或直接：
+
+```bash
+python main.py \
+  --robot_amount 1 \
+  --robot go2 \
+  --custom_env hospital \
+  --cmd_source keyboard
 ```
-* Note: The script is set up for dual-GPU training by default. Adjust it based on your hardware if necessary.
 
-## ROS2 SDK
+键位：
 
-You can use https://github.com/abizovnuralem/go2_ros2_sdk as a basement for your ROS2 setup.
+- `W/S` 前进/后退
+- `A/D` 左移/右移
+- `Q/E` 左转/右转
+
+### 2. ROS2 控制模式
+
+适合接导航栈。此模式下 `omniverse_sim.py` 只接收 `robot{i}/cmd_vel`，不会再响应键盘。
+
+```bash
+cd go2_omniverse
+CMD_SOURCE=ros2 bash run_sim.sh
+```
+
+这个模式适合接 `3d-navi` 导航栈，或者其他会往 `robot0/cmd_vel` 发速度命令的 ROS2 上层。
+
+## 默认控制接口
+
+仿真内部保留这些原生话题：
+
+- `robot0/odom`
+- `robot0/imu`
+- `robot0/point_cloud2_L1`
+- `robot0/front_cam/rgb`
+- `robot0/front_cam/camera_info`
+- `robot0/front_cam/semantic_segmentation`
+- `robot0/base_command`
+- `robot0/cmd_vel`
+
+说明：
+
+- `robot0/cmd_vel` 是外部导航命令写入仿真的入口
+- `robot0/base_command` 是当前真正送进 RL policy 的高层速度命令
+
+## 模型推理
+
+`omniverse_sim.py` 的推理流程是：
+
+1. 解析实验目录和 checkpoint
+2. 用 `OnPolicyRunner.load(...)` 载入 RSL-RL 权重
+3. 获取 inference policy
+4. 在循环里执行 `obs -> policy(obs) -> env.step(actions)`
+
+常用环境变量：
+
+- `EXPERIMENT_NAME`
+- `LOAD_RUN`
+- `CHECKPOINT`
+- `CMD_SOURCE`
+
+例如：
+
+```bash
+EXPERIMENT_NAME=unitree_go2_rough \
+CHECKPOINT=model_7850.pt \
+CMD_SOURCE=ros2 \
+bash run_sim.sh
+```
+
+## 训练
+
+楼梯训练入口：
+
+```bash
+cd go2_omniverse
+bash run_train_stairs.sh
+```
+
+如果你要直接跑 Python：
+
+```bash
+python train_stairs.py --headless --num_envs 4096 --max_iterations 15000
+```
+
+训练日志默认在：
+
+- `train_stairs_logs/`
+- `logs/rsl_rl/`
+
+## 这层最常见的问题
+
+### 仿真能开，但机器人不动
+
+- 确认 checkpoint 路径是否正确
+- 确认 `CMD_SOURCE` 是否和当前使用方式一致
+- 如果是导航模式，确认是否真的有消息发到 `robot0/cmd_vel`
+
+### hospital 场景加载失败
+
+- 检查 `HOSPITAL_USD` 路径
+- 检查本地 Isaac Sim 资产目录是否完整
+
+### 训练模型加载后行为异常
+
+- 确认 checkpoint 对应的 observation / action 配置没有变
+- 确认当前运行模式没有让键盘和 ROS2 同时写命令
 
 
-## Select custom env
-
-To use predifined custom envs, you need to download files from https://drive.google.com/drive/folders/1vVGuO1KIX1K6mD6mBHDZGm9nk2vaRyj3?usp=sharing and place them to /envs folder.
-Then you can execute it via python main.py --custom_env=office or python main.py --custom_env=warehouse commands (The whole cmd you can read from run_sim script). If you are doing it first time, it will take 2-3 minutes to configure the env. Please, wait.
-
-
-## Development
-
-To contribute or modify the project, refer to these resources for implementing additional features or improving the existing codebase. PRs are welcome!
-
-## VR support
-
-To enable VR support on linux will take some time, but it works!
-I have tested it on:
-1. Ubuntu 22.04
-2. Nvidia drivers are 545.29.06 
-3. SteamVR 2.4.4 (IMPORTANT! It should be 2.4.4) and you need to go to Compatibility tab (Inside Steam app) and "Force the use of a specific Steam Play compatibility tool" and switch to "Steam-Play-None", additional info you can find in ALVR github issues tab.
-4. ALVR streamer 20.8.1 + Oculus Quest 2 (client ALVR you can install via SideQuest app) (How to install it: https://github.com/alvr-org/ALVR)
-5. Execute IsaacSim, Go to Window -> Extensions, find STEAMVR INPUT/OUTPUT then enable it and enable AutoLoad. Reopen IsaacSim. Use OpenXR mode.
-6. Enjoy Omniverse in VR mode!
-
-## Thanks
-Special thanks to Leul Tesfaye for his expertise in Orbit lidars and Tamas @tfoldi for contributing to this project.
-
-
-## License
-
-This project is licensed under the BSD 2-clause License - see the [LICENSE](https://github.com/abizovnuralem/go2_omniverse/blob/master/LICENSE) file for details.

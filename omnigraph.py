@@ -130,6 +130,57 @@ def create_front_cam_omnigraph(robot_num):
                     f"robot{robot_num}/front_cam/semantic_segmentation",
                 ),
                 ("ROS2CameraHelper.inputs:frameId", f"robot{robot_num}"),
+                # Publishes {id: {class: name}} JSON on
+                # robot{N}/front_cam/semantic_segmentation_labels (std_msgs/String)
+                ("ROS2CameraHelper.inputs:enableSemanticLabels", True),
+            ],
+            keys.CONNECT: [
+                (
+                    "OnPlaybackTick.outputs:tick",
+                    "IsaacCreateRenderProduct.inputs:execIn",
+                ),
+                (
+                    "IsaacCreateRenderProduct.outputs:execOut",
+                    "ROS2CameraHelper.inputs:execIn",
+                ),
+                (
+                    "IsaacCreateRenderProduct.outputs:renderProductPath",
+                    "ROS2CameraHelper.inputs:renderProductPath",
+                ),
+            ],
+        },
+    )
+
+    # ------------------------------------------------------------------
+    # Graph 3 — Camera Info
+    # Publishes: robot{N}/front_cam/camera_info  (sensor_msgs/CameraInfo)
+    # ------------------------------------------------------------------
+    og.Controller.edit(
+        {
+            "graph_path": f"/ROS_front_cam{robot_num}_info",
+            "evaluator_name": "execution",
+            "pipeline_stage": og.GraphPipelineStage.GRAPH_PIPELINE_STAGE_SIMULATION,
+        },
+        {
+            keys.CREATE_NODES: [
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+                (
+                    "IsaacCreateRenderProduct",
+                    "isaacsim.core.nodes.IsaacCreateRenderProduct",
+                ),
+                ("ROS2CameraHelper", "isaacsim.ros2.bridge.ROS2CameraHelper"),
+            ],
+            keys.SET_VALUES: [
+                ("IsaacCreateRenderProduct.inputs:cameraPrim", camera_prim),
+                ("IsaacCreateRenderProduct.inputs:enabled", True),
+                ("IsaacCreateRenderProduct.inputs:width", CAMERA_WIDTH),
+                ("IsaacCreateRenderProduct.inputs:height", CAMERA_HEIGHT),
+                ("ROS2CameraHelper.inputs:type", "camera_info"),
+                (
+                    "ROS2CameraHelper.inputs:topicName",
+                    f"robot{robot_num}/front_cam/camera_info",
+                ),
+                ("ROS2CameraHelper.inputs:frameId", f"robot{robot_num}/front_cam"),
             ],
             keys.CONNECT: [
                 (

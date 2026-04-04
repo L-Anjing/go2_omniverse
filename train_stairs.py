@@ -161,10 +161,10 @@ STAIRS_MIXED_TERRAIN_CFG = TerrainGeneratorCfg(
             border_width=0.25,
         ),
         # Primary target: pyramid stairs up and down.
-        # step_height_range: row 0 ≈ 0.02 m, row 9 ≈ 0.18 m (covers hospital).
+        # step_height_range: row 0 ≈ 0.02 m, row 9 ≈ 0.22 m (hospital stairs).
         "pyramid_stairs": terrain_gen.MeshPyramidStairsTerrainCfg(
             proportion=0.15,
-            step_height_range=(0.02, 0.18),
+            step_height_range=(0.02, 0.22),
             step_width=0.30,
             platform_width=2.5,
             border_width=1.0,
@@ -172,7 +172,7 @@ STAIRS_MIXED_TERRAIN_CFG = TerrainGeneratorCfg(
         ),
         "pyramid_stairs_inv": terrain_gen.MeshInvertedPyramidStairsTerrainCfg(
             proportion=0.10,
-            step_height_range=(0.02, 0.18),
+            step_height_range=(0.02, 0.22),
             step_width=0.30,
             platform_width=2.5,
             border_width=1.0,
@@ -263,7 +263,7 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
 
         # Keep stepping incentives modest; too much lift reward from scratch
         # tends to create hopping or flailing rather than usable gait.
-        self.rewards.feet_air_time.weight = 0.05
+        self.rewards.feet_air_time.weight = 0.15
         self.rewards.feet_air_time.params["sensor_cfg"].body_names = ".*_foot"
 
         # Small survival bonus helps early learning without dominating gait.
@@ -310,7 +310,7 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
                 "sensor_cfg": SceneEntityCfg("height_scanner"),
                 "asset_cfg": SceneEntityCfg("robot", body_names=".*_foot"),
                 "base_margin":    0.05,
-                "max_additional": 0.12,
+                "max_additional": 0.20,
                 "std":            0.10,
                 "tanh_mult":      2.0,
             },
