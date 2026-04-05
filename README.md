@@ -1,132 +1,201 @@
 # go2_omniverse
 
 **Forked from https://github.com/abizovnuralem/go2_omniverse**  
-具体部署步骤参见原仓库，本仓库在原仓库基础上进行修改，适配个人工程需要。  
-本仓库具有 **Isaac Lab / Omniverse 里的 Go2 仿真、低层 RL 推理和训练**。  
+**Reference repo https://github.com/wty-yy/go2_rl_gym**
 
+本仓库在原始 `go2_omniverse` 基础上，补齐了更完整的 Isaac Lab / Omniverse 仿真、ROS2 接口，以及参考 `go2_rl_gym` 思路实现的 Go2 楼梯训练与部署链路。
 
-## 这个仓库目前已经具备的效果
+当前重点能力：
 
+- Go2 / G1 在 Isaac Lab 中的实时 locomotion 推理
+- 键盘控制与 ROS2 `cmd_vel` 控制
+- RTX LiDAR、IMU、相机、语义分割数据发布
+- hospital / office / warehouse 自定义场景加载
+- Go2 楼梯 CTS 训练、checkpoint 保存与仿真部署
 
-- Go2 / G1 在 Isaac Lab 中的实时平衡与 locomotion 推理
-- 键盘实时控制
-- ROS2 实时控制接口
-- RTX LiDAR、IMU、**相机**、**语义分割** 话题发布 
-- Unitree L1 LiDAR 接入，适配PointLio算法
-- hospital / office / warehouse 等自定义场景加载
-- 楼梯 locomotion 训练脚本与 checkpoint 推理
+## 仓库结构
 
+- [main.py](/media/user/data1/carl/workspace/go2_omniverse/main.py)
+  仿真启动入口，内部调用 `core/omniverse_sim.py`
+- [core/omniverse_sim.py](/media/user/data1/carl/workspace/go2_omniverse/core/omniverse_sim.py)
+  Isaac Lab 仿真主逻辑，负责环境创建、checkpoint 加载、policy 推理与 ROS2 发布
+- [core/ros2.py](/media/user/data1/carl/workspace/go2_omniverse/core/ros2.py)
+  ROS2 传感器与状态话题发布
+- [configs/custom_rl_env.py](/media/user/data1/carl/workspace/go2_omniverse/configs/custom_rl_env.py)
+  Go2 / G1 / Go2StairDeploy 的环境配置
+- [configs/agent_cfg.py](/media/user/data1/carl/workspace/go2_omniverse/configs/agent_cfg.py)
+  RSL-RL 默认 agent 配置
+- [train_stairs.py](/media/user/data1/carl/workspace/go2_omniverse/train_stairs.py)
+  Go2 楼梯 CTS 训练入口
+- [rsl_rl_cts](/media/user/data1/carl/workspace/go2_omniverse/rsl_rl_cts)
+  CTS runner、actor-critic、rollout storage 等实现
+- [scripts/run_sim.sh](/media/user/data1/carl/workspace/go2_omniverse/scripts/run_sim.sh)
+  常用仿真启动脚本
+- [scripts/run_train_stairs.sh](/media/user/data1/carl/workspace/go2_omniverse/scripts/run_train_stairs.sh)
+  常用双卡训练脚本
 
-## 这个仓库负责什么
+## 当前训练与部署逻辑
 
-- 在 Isaac Lab 中加载 Go2 / G1 机器人和 hospital 等场景
-- 运行 RSL-RL checkpoint 做低层 locomotion 控制
-- 发布 ROS2 传感器和状态话题
-- 接收 `robot0/cmd_vel` 作为高层速度命令
-- 提供从零训练和楼梯训练脚本
+### 1. 楼梯训练现在是 CTS，不是纯 PPO
 
+[train_stairs.py](/media/user/data1/carl/workspace/go2_omniverse/train_stairs.py) 当前实现的是 **CTS: Concurrent Teacher-Student**。
 
-### Hospital 资产路径
+- Teacher 使用 privileged observation
+- Student 只使用部署可用的本体历史观测
+- 训练时使用 `history_length=5`
+- 默认实验目录是 `logs/rsl_rl/unitree_go2_stairs`
 
-Hospital 场景使用本地 Isaac Sim 资产路径。  
-如果你的机器路径不同，需要修改 [omniverse_sim.py](go2_omniverse/omniverse_sim.py) 里 `HOSPITAL_USD` 的实际位置。
+CTS 训练配置对齐了 `go2_rl_gym` 的一些经验：
 
-当前默认路径是是本人的绝对路径！！！
+- 4096 env 时 `num_steps_per_env=48`
+- `base_height_target=0.38`
+- 宽摩擦随机化 `0.2 ~ 2.0`
+- 加入 `hip_deviation`、`joint_deviation_all`、`feet_regulation`、`foot_contact_force` 等楼梯相关奖励
 
-## 主要入口
+### 2. 仿真会自动识别 CTS checkpoint
 
-- [omniverse_sim.py](go2_omniverse/omniverse_sim.py)
-  仿真主入口。创建 Isaac Lab 环境、加载 checkpoint、执行 `policy(obs) -> env.step(actions)`，并发布 ROS2 话题。
-- [run_sim.sh](go2_omniverse/run_sim.sh)
-  常用运行脚本。
-- [train_stairs.py](go2_omniverse/train_stairs.py)
-  楼梯 locomotion 训练入口。
-- [run_train_stairs.sh](go2_omniverse/run_train_stairs.sh)
-  训练启动脚本。
-- [ros2.py](go2_omniverse/ros2.py)
-  ROS2 发布接口，负责 odom、imu、lidar、camera、base_command 等话题。
+[core/omniverse_sim.py](/media/user/data1/carl/workspace/go2_omniverse/core/omniverse_sim.py) 会先检查 checkpoint 是否是 CTS 训练产物：
 
-## 快速部署与启动
+- 如果是普通 RSL-RL checkpoint，走 `UnitreeGo2CustomEnvCfg`
+- 如果是 CTS checkpoint，自动切到 `Go2StairDeployCfg`
 
-### 1. Go2 仿真推理
+这样可以保证部署时 observation 维度和训练一致，避免 weight 维度不匹配。
 
-最常用的启动方式：
+### 3. CTS 部署时 student 不直接读 height scan
+
+[configs/custom_rl_env.py](/media/user/data1/carl/workspace/go2_omniverse/configs/custom_rl_env.py) 里的 `Go2StairDeployCfg` 会输出 45D student observation：
+
+- `base_ang_vel`
+- `projected_gravity`
+- `velocity_commands`
+- `joint_pos`
+- `joint_vel`
+- `actions`
+
+也就是说，部署阶段 student 主要依赖**运动历史**推断楼梯，而不是直接读取 teacher 训练时的 privileged terrain 信息。
+
+## 自定义场景
+
+仓库内当前使用的场景资产路径：
+
+- hospital: `assets/env/hospital_labeled.usd`
+- office: `assets/env/office.usd`
+- warehouse: `assets/env/warehouse.usd`
+
+其中 hospital 的逻辑比较特殊：
+
+- 场景在 `gym.make()` 之前注入，避免 PhysX 运行后再动态加碰撞体
+- 会主动关闭 hospital 内置的 `CollisionPlane`
+- 这样可以避免它和 Isaac Lab 的 `/World/ground` 重叠导致接触异常
+
+如果你换机器，只需要确认这些仓库内的 USD 文件路径仍然有效。
+
+## 快速启动
+
+### 1. Go2 仿真
 
 ```bash
-cd go2_omniverse
-bash run_sim.sh
+cd /media/user/data1/carl/workspace/go2_omniverse
+./scripts/run_sim.sh
 ```
 
-这会走 [run_sim.sh](go2_omniverse/run_sim.sh)，默认加载当前脚本里配置的实验名、checkpoint 和 `CMD_SOURCE`。
+当前 [scripts/run_sim.sh](/media/user/data1/carl/workspace/go2_omniverse/scripts/run_sim.sh) 默认参数是：
 
-### 2. G1 仿真推理
+- `EXPERIMENT_NAME=unitree_go2_stairs`
+- `LOAD_RUN=.*`
+- `CHECKPOINT=model_2800.pt`
+- `CMD_SOURCE=keyboard`
 
-如果你保留了对应脚本，也可以单独启动 G1：
+也就是默认直接跑楼梯实验的 checkpoint，而不是旧的 `unitree_go2_rough`。
+
+### 2. 指定 checkpoint / 控制源
 
 ```bash
-cd go2_omniverse
-bash run_sim_g1.sh
+EXPERIMENT_NAME=unitree_go2_stairs \
+CHECKPOINT=model_2800.pt \
+CMD_SOURCE=ros2 \
+./scripts/run_sim.sh
 ```
 
 ### 3. 楼梯训练
 
 ```bash
-cd go2_omniverse
-bash run_train_stairs.sh
+cd /media/user/data1/carl/workspace/go2_omniverse
+./scripts/run_train_stairs.sh
 ```
 
-### 4. 直接指定模型与控制源
-
-例如：
+也可以直接指定环境数和训练轮数：
 
 ```bash
-EXPERIMENT_NAME=unitree_go2_rough \
-CHECKPOINT=model_7850.pt \
-CMD_SOURCE=ros2 \
-bash run_sim.sh
+./scripts/run_train_stairs.sh 4096 15000
 ```
 
-## 运行模式
-
-### 1. 键盘遥控模式
-
-适合手动探索、录传感器流、辅助建图。
+或者直接运行 Python：
 
 ```bash
-cd go2_omniverse
-CMD_SOURCE=keyboard bash run_sim.sh
+python train_stairs.py --headless --num_envs 4096 --max_iterations 15000
 ```
 
-或直接：
+## 日志与模型
+
+训练脚本 [scripts/run_train_stairs.sh](/media/user/data1/carl/workspace/go2_omniverse/scripts/run_train_stairs.sh) 会输出：
+
+- 日志：`logs/train_stairs_logs/train_gpu0.log`
+- PID：`logs/train_stairs_logs/train_gpu0.pid`
+- 日志：`logs/train_stairs_logs/train_gpu1.log`
+- PID：`logs/train_stairs_logs/train_gpu1.pid`
+
+模型权重默认保存在：
+
+- `logs/rsl_rl/unitree_go2_stairs/`
+
+实时看训练日志：
 
 ```bash
-python main.py \
-  --robot_amount 1 \
-  --robot go2 \
-  --custom_env hospital \
-  --cmd_source keyboard
+tail -f logs/train_stairs_logs/train_gpu0.log | grep -E '\[CTS|ERROR|Traceback'
+tail -f logs/train_stairs_logs/train_gpu1.log | grep -E '\[CTS|ERROR|Traceback'
 ```
 
-键位：
-
-- `W/S` 前进/后退
-- `A/D` 左移/右移
-- `Q/E` 左转/右转
-
-### 2. ROS2 控制模式
-
-适合接导航栈。此模式下 `omniverse_sim.py` 只接收 `robot{i}/cmd_vel`，不会再响应键盘。
+停止双卡训练：
 
 ```bash
-cd go2_omniverse
-CMD_SOURCE=ros2 bash run_sim.sh
+kill $(cat logs/train_stairs_logs/train_gpu0.pid) $(cat logs/train_stairs_logs/train_gpu1.pid)
 ```
 
-这个模式适合接 `3d-navi` 导航栈，或者其他会往 `robot0/cmd_vel` 发速度命令的 ROS2 上层。
+## 控制模式
 
-## 默认控制接口
+### 1. 键盘控制
 
-仿真内部保留这些原生话题：
+```bash
+CMD_SOURCE=keyboard ./scripts/run_sim.sh
+```
+
+按键：
+
+- `W/S` 前进 / 后退
+- `A/D` 左移 / 右移
+- `Q/E` 左转 / 右转
+
+当前 [core/omniverse_sim.py](/media/user/data1/carl/workspace/go2_omniverse/core/omniverse_sim.py) 中键盘速度默认是：
+
+- 线速度 `1.5 m/s`
+- 角速度 `1.5 rad/s`
+
+### 2. ROS2 控制
+
+```bash
+CMD_SOURCE=ros2 ./scripts/run_sim.sh
+```
+
+此时仿真订阅：
+
+- `robot0/cmd_vel`
+
+并将当前送入 policy 的高层命令维护在：
+
+- `robot0/base_command`
+
+## 默认 ROS2 话题
 
 - `robot0/odom`
 - `robot0/imu`
@@ -137,72 +206,30 @@ CMD_SOURCE=ros2 bash run_sim.sh
 - `robot0/base_command`
 - `robot0/cmd_vel`
 
-说明：
+## 常见问题
 
-- `robot0/cmd_vel` 是外部导航命令写入仿真的入口
-- `robot0/base_command` 是当前真正送进 RL policy 的高层速度命令
+### 1. 仿真能启动，但机器人不动
 
-## 模型推理
+- 检查 `EXPERIMENT_NAME` 是否指向正确实验目录
+- 检查 `CHECKPOINT` 是否真的存在于 `logs/rsl_rl/<experiment>/`
+- 如果使用 ROS2，确认 `robot0/cmd_vel` 真的有消息
 
-`omniverse_sim.py` 的推理流程是：
+### 2. CTS checkpoint 加载失败
 
-1. 解析实验目录和 checkpoint
-2. 用 `OnPolicyRunner.load(...)` 载入 RSL-RL 权重
-3. 获取 inference policy
-4. 在循环里执行 `obs -> policy(obs) -> env.step(actions)`
+- 检查 checkpoint 是否来自 `train_stairs.py`
+- 检查部署环境是否自动切到了 `Go2StairDeployCfg`
+- 如果自己改过 observation，确认训练和部署的 obs 维度一致
 
-常用环境变量：
+### 3. hospital 场景碰撞异常
 
-- `EXPERIMENT_NAME`
-- `LOAD_RUN`
-- `CHECKPOINT`
-- `CMD_SOURCE`
+- 检查 `assets/env/hospital_labeled.usd` 是否存在
+- 检查 hospital 的 `CollisionPlane` 是否已被关闭
+- 不要在 `gym.make()` 之后再手工往场景里追加 hospital 碰撞体
 
-例如：
+### 4. 训练日志路径和旧 README 不一致
 
-```bash
-EXPERIMENT_NAME=unitree_go2_rough \
-CHECKPOINT=model_7850.pt \
-CMD_SOURCE=ros2 \
-bash run_sim.sh
-```
+当前训练日志目录已经是：
 
-## 训练
+- `logs/train_stairs_logs/`
 
-楼梯训练入口：
-
-```bash
-cd go2_omniverse
-bash run_train_stairs.sh
-```
-
-如果你要直接跑 Python：
-
-```bash
-python train_stairs.py --headless --num_envs 4096 --max_iterations 15000
-```
-
-训练日志默认在：
-
-- `train_stairs_logs/`可以实时查看`Reward`
-- `logs/rsl_rl/`权重文件保存
-
-## 这层最常见的问题
-
-### 仿真能开，但机器人不动
-
-- 确认 checkpoint 路径是否正确
-- 确认 `CMD_SOURCE` 是否和当前使用方式一致
-- 如果是导航模式，确认是否真的有消息发到 `robot0/cmd_vel`
-
-### hospital 场景加载失败
-
-- 检查 `HOSPITAL_USD` 路径
-- 检查本地 Isaac Sim 资产目录是否完整
-
-### 训练模型加载后行为异常
-
-- 确认 checkpoint 对应的 observation / action 配置没有变
-- 确认当前运行模式没有让键盘和 ROS2 同时写命令
-
-
+不是旧版本里写的仓库根目录 `train_stairs_logs/`。
