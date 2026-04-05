@@ -10,5 +10,5 @@ env
 .codex
 .claude
 .codex
-revise.md
-train_stairs.md
+docs/
+rsl_rl_cts/__pycache__
