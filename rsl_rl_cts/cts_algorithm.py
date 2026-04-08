@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy
 import itertools
 import torch
 import torch.nn as nn
@@ -44,6 +45,7 @@ class CTS:
         schedule: str = "adaptive",
         desired_kl: float = 0.01,
         teacher_env_ratio: float = 0.75,
+        value_target_limit: float = 1000.0,
         device: str = "cpu",
         **kwargs,
     ):
@@ -55,6 +57,7 @@ class CTS:
         self.schedule = schedule
         self.learning_rate = learning_rate
         self.history_length = history_length
+        self.value_target_limit = value_target_limit
 
         self.model = model.to(device)
         self.storage: RolloutStorageCTS | None = None
@@ -116,6 +119,35 @@ class CTS:
 
     def train_mode(self):
         self.model.train()
+
+    def snapshot_state(self) -> dict:
+        """Capture the current train state so a bad PPO step can be rolled back."""
+        return {
+            "model": {k: v.detach().clone() for k, v in self.model.state_dict().items()},
+            "optimizer1": copy.deepcopy(self.optimizer1.state_dict()),
+            "optimizer2": copy.deepcopy(self.optimizer2.state_dict()),
+            "learning_rate": self.learning_rate,
+        }
+
+    def restore_state(self, snapshot: dict) -> None:
+        """Restore a previously captured train state."""
+        self.model.load_state_dict(snapshot["model"])
+        self.optimizer1.load_state_dict(snapshot["optimizer1"])
+        self.optimizer2.load_state_dict(snapshot["optimizer2"])
+        self.learning_rate = snapshot["learning_rate"]
+        for group in self.optimizer1.param_groups:
+            group["lr"] = self.learning_rate
+
+    def get_nonfinite_state_names(self) -> list[str]:
+        """Return parameter/buffer names that contain NaN or inf."""
+        bad_names: list[str] = []
+        for name, tensor in itertools.chain(
+            self.model.named_parameters(),
+            self.model.named_buffers(),
+        ):
+            if not torch.isfinite(tensor).all():
+                bad_names.append(name)
+        return bad_names
 
     # ── Rollout collection ────────────────────────────────────────────────────
 
@@ -186,12 +218,21 @@ class CTS:
             self.model.evaluate(last_privileged_obs[ti], last_history[ti], True).detach(),
             self.model.evaluate(last_privileged_obs[si], last_history[si], False).detach(),
         ], dim=0)
-        self.storage.compute_returns(last_vals, self.gamma, self.lam)
+        last_vals = torch.nan_to_num(last_vals, nan=0.0, posinf=0.0, neginf=0.0)
+        last_vals = last_vals.clamp(-self.value_target_limit, self.value_target_limit)
+        self.storage.compute_returns(
+            last_vals,
+            self.gamma,
+            self.lam,
+            self.value_target_limit,
+        )
 
     # ── Learning ──────────────────────────────────────────────────────────────
 
     def update(self) -> tuple[float, float, float, float]:
         mean_value_loss = mean_surrogate_loss = mean_entropy_loss = mean_latent_loss = 0.0
+        num_ppo_updates = 0
+        num_latent_updates = 0
         assert not self.model.is_recurrent
 
         data = list(self.storage.mini_batch_generator(
@@ -205,11 +246,44 @@ class CTS:
              tgt_val_b, adv_b, ret_b,
              old_lp_b, old_mu_b, old_sig_b, _, _) = sample
 
+            tgt_val_b = torch.nan_to_num(tgt_val_b, nan=0.0, posinf=0.0, neginf=0.0)
+            ret_b = torch.nan_to_num(ret_b, nan=0.0, posinf=0.0, neginf=0.0)
+            adv_b = torch.nan_to_num(adv_b, nan=0.0, posinf=0.0, neginf=0.0).clamp(-20.0, 20.0)
+            old_lp_b = torch.nan_to_num(old_lp_b, nan=0.0, posinf=0.0, neginf=0.0)
+            old_mu_b = torch.nan_to_num(old_mu_b, nan=0.0, posinf=0.0, neginf=0.0)
+            old_sig_b = torch.nan_to_num(old_sig_b, nan=1.0, posinf=1.0, neginf=1.0).clamp(1e-6, 10.0)
+            tgt_val_b = tgt_val_b.clamp(-self.value_target_limit, self.value_target_limit)
+            ret_b = ret_b.clamp(-self.value_target_limit, self.value_target_limit)
+
             def _fwd(start, end, is_t):
-                self.model.act(obs_b[start:end], priv_obs_b[start:end], hist_b[start:end], is_t)
-                lp  = self.model.get_actions_log_prob(act_b[start:end])
-                val = self.model.evaluate(priv_obs_b[start:end], hist_b[start:end], is_t)
-                return lp, val, self.model.action_mean, self.model.action_std, self.model.entropy
+                # Sanitize inputs before forward pass — NaN in obs/history
+                # (from dying strategy + short-episode rollouts) can propagate
+                # into network weights and cause Normal(loc=NaN) crash.
+                obs_in  = torch.nan_to_num(obs_b[start:end],      nan=0.0)
+                priv_in = torch.nan_to_num(priv_obs_b[start:end], nan=0.0)
+                hist_in = torch.nan_to_num(hist_b[start:end],     nan=0.0)
+                self.model.act(obs_in, priv_in, hist_in, is_t)
+                lp  = torch.nan_to_num(
+                    self.model.get_actions_log_prob(act_b[start:end]),
+                    nan=0.0, posinf=0.0, neginf=0.0,
+                )
+                val = torch.nan_to_num(
+                    self.model.evaluate(priv_in, hist_in, is_t),
+                    nan=0.0, posinf=0.0, neginf=0.0,
+                ).clamp(-self.value_target_limit, self.value_target_limit)
+                mu = torch.nan_to_num(
+                    self.model.action_mean,
+                    nan=0.0, posinf=0.0, neginf=0.0,
+                )
+                sig = torch.nan_to_num(
+                    self.model.action_std,
+                    nan=1.0, posinf=1.0, neginf=1.0,
+                ).clamp(1e-6, 10.0)
+                ent = torch.nan_to_num(
+                    self.model.entropy,
+                    nan=0.0, posinf=0.0, neginf=0.0,
+                )
+                return lp, val, mu, sig, ent
 
             t_res = _fwd(0, t_batch, True)
             s_res = _fwd(t_batch, t_batch + s_batch, False)
@@ -250,41 +324,64 @@ class CTS:
             loss = surrogate_loss + self.value_loss_coef * v_loss \
                    - self.entropy_coef * ent_b.mean()
 
+            if not torch.isfinite(loss):
+                print("[CTS] Warning: skipping non-finite PPO batch loss.", flush=True)
+                self.optimizer1.zero_grad(set_to_none=True)
+                continue
+
             self.optimizer1.zero_grad()
             loss.backward()
-            nn.utils.clip_grad_norm_(
+            grad_norm = nn.utils.clip_grad_norm_(
                 itertools.chain.from_iterable(g["params"] for g in self.optimizer1.param_groups),
                 self.max_grad_norm,
             )
+            if not torch.isfinite(torch.as_tensor(grad_norm, device=loss.device)):
+                print("[CTS] Warning: skipping PPO batch with non-finite grad norm.", flush=True)
+                self.optimizer1.zero_grad(set_to_none=True)
+                continue
             self.optimizer1.step()
 
             mean_value_loss     += v_loss.item()
             mean_surrogate_loss += surrogate_loss.item()
             mean_entropy_loss   += ent_b.mean().item()
+            num_ppo_updates += 1
 
         # ── Distillation pass (student encoder only) ──────────────────────────
         for sample in data:
             (obs_b, priv_obs_b, _, hist_b, *_rest) = sample
-            student_latent = self.model.student_encoder(hist_b[t_batch:])
+            hist_student = torch.nan_to_num(hist_b[t_batch:], nan=0.0, posinf=0.0, neginf=0.0)
+            priv_student = torch.nan_to_num(priv_obs_b[t_batch:], nan=0.0, posinf=0.0, neginf=0.0)
+            student_latent = self.model.student_encoder(hist_student)
             with torch.no_grad():
-                teacher_latent = self.model.teacher_encoder(priv_obs_b[t_batch:])
+                teacher_latent = self.model.teacher_encoder(priv_student)
             latent_loss = (teacher_latent - student_latent).pow(2).mean()
+
+            if not torch.isfinite(latent_loss):
+                print("[CTS] Warning: skipping non-finite latent batch loss.", flush=True)
+                self.optimizer2.zero_grad(set_to_none=True)
+                continue
 
             self.optimizer2.zero_grad()
             latent_loss.backward()
-            nn.utils.clip_grad_norm_(
+            grad_norm = nn.utils.clip_grad_norm_(
                 self.model.student_encoder.parameters(), self.max_grad_norm)
+            if not torch.isfinite(torch.as_tensor(grad_norm, device=latent_loss.device)):
+                print("[CTS] Warning: skipping latent batch with non-finite grad norm.", flush=True)
+                self.optimizer2.zero_grad(set_to_none=True)
+                continue
             self.optimizer2.step()
             mean_latent_loss += latent_loss.item()
+            num_latent_updates += 1
 
-        n = self.num_learning_epochs * self.num_mini_batches
+        n_ppo = max(num_ppo_updates, 1)
+        n_latent = max(num_latent_updates, 1)
         # Important: reset rollout cursor for the next collection phase.
         # Without this, the next iteration keeps writing past
         # num_transitions_per_env and triggers "Rollout buffer overflow".
         self.storage.clear()
         return (
-            mean_value_loss / n,
-            mean_surrogate_loss / n,
-            mean_entropy_loss / n,
-            mean_latent_loss / n,
+            mean_value_loss / n_ppo,
+            mean_surrogate_loss / n_ppo,
+            mean_entropy_loss / n_ppo,
+            mean_latent_loss / n_latent,
         )

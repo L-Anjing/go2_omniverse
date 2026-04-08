@@ -5,10 +5,10 @@ install
 __pycache__
 .env
 logs/rsl_rl/unitree_go2_stairs
+logs/rsl_rl/unitree_go2_fullscene_cts
 train_stairs_logs/
 env
 .codex
 .claude
 .codex
-docs/
 rsl_rl_cts/__pycache__

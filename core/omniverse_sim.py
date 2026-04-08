@@ -79,6 +79,41 @@ parser.add_argument(
         "'keyboard' for manual teleop, 'ros2' for /robot{N}/cmd_vel subscribers."
     ),
 )
+parser.add_argument(
+    "--viewer_follow",
+    type=str,
+    choices=("auto", "on", "off"),
+    default="auto",
+    help=(
+        "Viewer tracking mode for the main camera. "
+        "'auto' keeps the previous behavior (follow only for single-robot play), "
+        "'on' always follows the robot root, and 'off' leaves the viewer free."
+    ),
+)
+parser.add_argument(
+    "--action_smoothing",
+    type=float,
+    default=0.15,
+    help=(
+        "EMA factor applied to policy actions before env.step(). "
+        "0 disables smoothing; larger values keep more of the previous action."
+    ),
+)
+parser.add_argument(
+    "--zero_cmd_stance_blend",
+    type=float,
+    default=0.35,
+    help=(
+        "When |cmd| is near zero, blend this fraction of the action back to 0 "
+        "(default joint pose) to suppress stand-still twitching."
+    ),
+)
+parser.add_argument(
+    "--zero_cmd_threshold",
+    type=float,
+    default=0.05,
+    help="Command-norm threshold below which zero-command stance blending is enabled.",
+)
 
 
 # append RSL-RL cli arguments
@@ -138,7 +173,12 @@ from geometry_msgs.msg import Twist
 
 
 from configs.agent_cfg import unitree_go2_agent_cfg, unitree_g1_agent_cfg
-from configs.custom_rl_env import UnitreeGo2CustomEnvCfg, Go2StairDeployCfg, G1RoughEnvCfg
+from configs.custom_rl_env import (
+    UnitreeGo2CustomEnvCfg,
+    Go2StairDeployCfg,
+    Go2FullSceneDeployCfg,
+    G1RoughEnvCfg,
+)
 import configs.custom_rl_env as custom_rl_env
 
 from assets.robots.copter.config import CRAZYFLIE_CFG
@@ -198,6 +238,33 @@ def _is_cts_checkpoint(path: str) -> bool:
     return any(k.startswith("teacher_encoder") for k in ckpt.get("model_state_dict", {}))
 
 
+def _infer_cts_checkpoint_dims(checkpoint_path: str, map_location: str = "cpu") -> dict[str, int]:
+    """Infer CTS model dimensions directly from checkpoint tensor shapes."""
+    ckpt = torch.load(checkpoint_path, map_location=map_location)
+    state_dict = ckpt["model_state_dict"]
+
+    enc_w = sorted(k for k in state_dict if k.startswith("teacher_encoder.") and k.endswith(".weight"))
+    latent_dim = state_dict[enc_w[-1]].shape[0]
+
+    act_w = sorted(k for k in state_dict if k.startswith("actor.") and k.endswith(".weight"))
+    num_actor_obs = state_dict[act_w[0]].shape[1] - latent_dim
+    num_actions = state_dict[act_w[-1]].shape[0]
+
+    crit_w = sorted(k for k in state_dict if k.startswith("critic.") and k.endswith(".weight"))
+    num_critic_obs = state_dict[crit_w[0]].shape[1] - latent_dim
+
+    stu_w = sorted(k for k in state_dict if k.startswith("student_encoder.") and k.endswith(".weight"))
+    history_length = state_dict[stu_w[0]].shape[1] // num_actor_obs
+
+    return {
+        "latent_dim": latent_dim,
+        "num_actor_obs": num_actor_obs,
+        "num_critic_obs": num_critic_obs,
+        "num_actions": num_actions,
+        "history_length": history_length,
+    }
+
+
 def load_cts_policy(checkpoint_path: str, env, device: str):
     """Load a CTS checkpoint and return a student-only inference callable.
 
@@ -213,20 +280,12 @@ def load_cts_policy(checkpoint_path: str, env, device: str):
 
     ckpt = torch.load(checkpoint_path, map_location=device)
     state_dict = ckpt["model_state_dict"]
-
-    # --- infer architecture from weight shapes ---
-    enc_w = sorted(k for k in state_dict if k.startswith("teacher_encoder.") and k.endswith(".weight"))
-    latent_dim = state_dict[enc_w[-1]].shape[0]          # last Linear out = latent dim
-
-    act_w  = sorted(k for k in state_dict if k.startswith("actor.") and k.endswith(".weight"))
-    num_actor_obs = state_dict[act_w[0]].shape[1] - latent_dim   # first actor Linear in
-    num_actions   = state_dict[act_w[-1]].shape[0]               # last actor Linear out
-
-    crit_w = sorted(k for k in state_dict if k.startswith("critic.") and k.endswith(".weight"))
-    num_critic_obs = state_dict[crit_w[0]].shape[1] - latent_dim # first critic Linear in
-
-    stu_w  = sorted(k for k in state_dict if k.startswith("student_encoder.") and k.endswith(".weight"))
-    history_length = state_dict[stu_w[0]].shape[1] // num_actor_obs
+    dims = _infer_cts_checkpoint_dims(checkpoint_path, map_location=device)
+    latent_dim = dims["latent_dim"]
+    num_actor_obs = dims["num_actor_obs"]
+    num_actions = dims["num_actions"]
+    num_critic_obs = dims["num_critic_obs"]
+    history_length = dims["history_length"]
 
     print(f"[CTS] Checkpoint dims: actor_obs={num_actor_obs}, critic_obs={num_critic_obs}, "
           f"actions={num_actions}, latent={latent_dim}, history={history_length}")
@@ -270,11 +329,49 @@ def resolve_checkpoint_path(
 
 
 # Keyboard teleop speed settings (m/s for linear, rad/s for angular).
-# The policy was trained with lin_vel_x/y in [-1.0, 1.0] m/s and
-# ang_vel_z in [-1.5, 1.5] rad/s (later curriculum up to ±2.0 / ±2.0).
-# Keep CMD_LIN_VEL within ±2.0 and CMD_ANG_VEL within ±2.0 for safety.
+# These defaults are safe for general Go2 PPO play. CTS stair checkpoints are
+# narrowed at runtime to match their actual training command envelope.
 CMD_LIN_VEL = 1.5   # forward / backward / strafe speed  [m/s]
 CMD_ANG_VEL = 1.5   # yaw rotation speed                 [rad/s]
+
+
+def _viewer_should_follow() -> bool:
+    if args_cli.viewer_follow == "on":
+        return True
+    if args_cli.viewer_follow == "off":
+        return False
+    return args_cli.robot_amount == 1
+
+
+def _base_command_tensor(num_envs: int, device: torch.device | str) -> torch.Tensor:
+    cmds = torch.zeros(num_envs, 3, device=device)
+    for i in range(num_envs):
+        value = custom_rl_env.base_command.get(str(i))
+        if value is not None:
+            cmds[i] = torch.tensor(value, device=device)
+    return cmds
+
+
+def _stabilize_policy_actions(
+    raw_actions: torch.Tensor,
+    prev_actions: torch.Tensor | None,
+    cmd_tensor: torch.Tensor,
+) -> torch.Tensor:
+    actions = raw_actions
+
+    smoothing = min(max(args_cli.action_smoothing, 0.0), 0.999)
+    if prev_actions is not None and smoothing > 0.0:
+        actions = prev_actions * smoothing + raw_actions * (1.0 - smoothing)
+
+    zero_cmd_blend = min(max(args_cli.zero_cmd_stance_blend, 0.0), 1.0)
+    zero_cmd_threshold = max(args_cli.zero_cmd_threshold, 0.0)
+    if zero_cmd_blend > 0.0:
+        zero_mask = torch.linalg.vector_norm(cmd_tensor, dim=1) <= zero_cmd_threshold
+        if torch.any(zero_mask):
+            actions = actions.clone()
+            actions[zero_mask] *= 1.0 - zero_cmd_blend
+
+    return actions
 
 
 def sub_keyboard_event(event, *args, **kwargs) -> bool:
@@ -401,11 +498,8 @@ def setup_custom_env():
             # /World/ground drives foot contact.
             import omni.usd
             stage = omni.usd.get_context().get_stage()
-            col_plane = stage.GetPrimAtPath("/World/hospital/Root/CollisionPlane")
-            if col_plane and col_plane.IsValid():
-                col_plane.SetActive(False)
-                print("[INFO] Hospital CollisionPlane deactivated (duplicate of /World/ground)")
-            else:
+            num_planes = _deactivate_hospital_collision_planes(stage)
+            if num_planes == 0:
                 print("[WARN] Hospital CollisionPlane prim not found — check path")
             print("[INFO] Hospital environment loaded at /World/hospital")
 
@@ -415,6 +509,33 @@ def setup_custom_env():
             "For warehouse/office, download envs from: "
             "https://drive.google.com/drive/folders/1vVGuO1KIX1K6mD6mBHDZGm9nk2vaRyj3?usp=sharing"
         )
+
+
+def _deactivate_hospital_collision_planes(stage) -> int:
+    """Disable duplicate ground-plane prims under the imported hospital subtree.
+
+    The labeled hospital USD does not reliably expose the original
+    ``/World/hospital/Root/CollisionPlane`` prim. In practice the duplicate
+    hospital-local ground may appear as either ``CollisionPlane`` or
+    ``WorldGrid`` after export/composition, so resolve by a small allowlist of
+    prim names instead of relying on one hard-coded path.
+    """
+    hospital_root = stage.GetPrimAtPath("/World/hospital")
+    if not hospital_root or not hospital_root.IsValid():
+        return 0
+
+    candidate_names = {"CollisionPlane", "WorldGrid"}
+    deactivated = 0
+    for prim in stage.Traverse():
+        path = str(prim.GetPath())
+        if not path.startswith("/World/hospital/"):
+            continue
+        if prim.GetName() not in candidate_names:
+            continue
+        prim.SetActive(False)
+        deactivated += 1
+        print(f"[INFO] Hospital duplicate ground prim deactivated: {path}")
+    return deactivated
 
 
 def cmd_vel_cb(msg, num_robot):
@@ -451,10 +572,10 @@ def run_sim():
 
     """Play with RSL-RL agent."""
     # ── Resolve agent cfg and checkpoint path FIRST ───────────────────────────
-    # We must know the checkpoint type before calling gym.make() because
-    # CTS checkpoints were trained with a narrow height scanner (size=[0.4, 0.3]
-    # → 20 rays → 68D policy obs) whereas UnitreeGo2CustomEnvCfg uses the wide
-    # scanner (size=[1.6, 1.0] → 187 rays → 235D), causing a weight-dim mismatch.
+    # We must know the checkpoint type before calling gym.make() because CTS
+    # checkpoints use dedicated deploy envs whose actor observation size can
+    # differ from the default PPO play env (for example 45D stair-student or
+    # 48D full-scene student).
     agent_cfg: RslRlOnPolicyRunnerCfg = resolve_agent_cfg(unitree_go2_agent_cfg)
     if args_cli.robot == "g1":
         agent_cfg = resolve_agent_cfg(unitree_g1_agent_cfg)
@@ -474,55 +595,83 @@ def run_sim():
 
     # ── Choose env cfg to match the checkpoint's observation space ────────────
     _cts = _is_cts_checkpoint(resume_path)
+    _cts_dims = _infer_cts_checkpoint_dims(resume_path) if _cts else None
     if args_cli.robot == "g1":
         env_cfg = G1RoughEnvCfg()
     elif _cts:
-        # CTS was trained with Go2StairTrainCfg → narrow height scanner → 68D obs
-        env_cfg = Go2StairDeployCfg()
-        print("[INFO] CTS checkpoint detected — using Go2StairDeployCfg (68D obs)")
+        actor_obs_dim = _cts_dims["num_actor_obs"]
+        if actor_obs_dim == 45:
+            env_cfg = Go2StairDeployCfg()
+            print("[INFO] CTS checkpoint detected — using Go2StairDeployCfg (45D student obs)")
+        elif actor_obs_dim == 48:
+            env_cfg = Go2FullSceneDeployCfg()
+            print("[INFO] CTS checkpoint detected — using Go2FullSceneDeployCfg (48D velocity-aware student obs)")
+        else:
+            raise RuntimeError(
+                f"Unsupported CTS actor observation size {actor_obs_dim}. "
+                "Add a matching deploy env cfg before running this checkpoint."
+            )
     else:
         env_cfg = UnitreeGo2CustomEnvCfg()
+
+    global CMD_LIN_VEL, CMD_ANG_VEL
+    if _cts and args_cli.robot != "g1":
+        actor_obs_dim = _cts_dims["num_actor_obs"]
+        if actor_obs_dim == 45:
+            CMD_LIN_VEL = 0.5
+            CMD_ANG_VEL = 0.6
+            print(
+                "[INFO] CTS stair deploy command limits enabled: "
+                f"lin={CMD_LIN_VEL:.1f} m/s, yaw={CMD_ANG_VEL:.1f} rad/s"
+            )
+        elif actor_obs_dim == 48:
+            CMD_LIN_VEL = 1.0
+            CMD_ANG_VEL = 1.0
+            print(
+                "[INFO] CTS full-scene deploy command limits enabled: "
+                f"lin={CMD_LIN_VEL:.1f} m/s, yaw={CMD_ANG_VEL:.1f} rad/s"
+            )
+
+    # Use a robot-following camera for single-robot play so visibility is not
+    # dominated by the hospital/world origin framing.
+    if _viewer_should_follow():
+        env_cfg.viewer.origin_type = "asset_root"
+        env_cfg.viewer.asset_name = "robot"
+        env_cfg.viewer.env_index = 0
+        env_cfg.viewer.eye = (2.8, 2.8, 1.6)
+        env_cfg.viewer.lookat = (0.0, 0.0, 0.45)
+        print("[INFO] Viewer set to follow robot root")
+    else:
+        print("[INFO] Viewer follow disabled; using free camera")
 
     # add N robots to env
     env_cfg.scene.num_envs = args_cli.robot_amount
     specify_cmd_for_robots(env_cfg.scene.num_envs)
-
-    # --- Hospital: inject into scene config BEFORE gym.make() ----------------
-    # PhysX composes all collision geometry during scene setup (inside gym.make).
-    # Loading hospital AFTER gym.make adds collision meshes to a running PhysX,
-    # which triggers penetration-correction forces every step → base_contact
-    # terminates every episode. Adding it as an AssetBaseCfg ensures it is in
-    # stage before the first physics broad-phase.
-    if args_cli.custom_env == "hospital":
-        HOSPITAL_USD = str(REPO_ROOT / "assets" / "env" / "hospital_labeled.usd")
-        env_cfg.scene.custom_env = AssetBaseCfg(
-            prim_path="/World/hospital",
-            spawn=sim_utils.UsdFileCfg(usd_path=HOSPITAL_USD),
-        )
-        # IsaacLab 2.1.0 RayCaster only supports a single mesh prim.
-        # The hospital USD contains multiple collision sub-meshes, which causes:
-        #   NotImplementedError: RayCaster currently only supports one mesh prim.
-        # Keep the default /World/ground (flat terrain plane) for height-scan
-        # ray casting.  The CTS student encoder uses observation history for
-        # stair navigation, so exact height-scan geometry is less critical.
 
     # create isaac environment (scene load + robot spawn; physics starts here)
     env = gym.make(args_cli.task, cfg=env_cfg)
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env)
 
-    # Deactivate the hospital's built-in CollisionPlane (it duplicates
-    # IsaacLab's /World/ground plane; two coincident planes cause
-    # conflicting contact normals that lock the robot).
+    # --- Hospital: load AFTER gym.make() so PhysX broad-phase is already done --
+    # Loading hospital as an AssetBaseCfg BEFORE gym.make() causes the hospital's
+    # built-in CollisionPlane to participate in PhysX's initial broad-phase along
+    # with IsaacLab's /World/ground plane.  Two coincident collision planes make
+    # PhysX scene initialisation fail ("scene can't load").
+    # Loading it post-gym.make() means the hospital collision meshes are added to
+    # a running PhysX scene; we immediately deactivate any duplicate ground planes
+    # so they are removed from the next broad-phase update.  The robot interacts
+    # with the hospital walls/floors via the hospital's non-plane collision meshes.
     if args_cli.custom_env == "hospital":
+        HOSPITAL_USD = str(REPO_ROOT / "assets" / "env" / "hospital_labeled.usd")
+        cfg_scene = sim_utils.UsdFileCfg(usd_path=HOSPITAL_USD)
+        cfg_scene.func("/World/hospital", cfg_scene, translation=(0.0, 0.0, 0.0))
         import omni.usd as _omni_usd  # noqa: PLC0415 — available only at runtime
         stage = _omni_usd.get_context().get_stage()
-        col_plane = stage.GetPrimAtPath("/World/hospital/Root/CollisionPlane")
-        if col_plane and col_plane.IsValid():
-            col_plane.SetActive(False)
-            print("[INFO] Hospital CollisionPlane deactivated")
-        else:
+        num_planes = _deactivate_hospital_collision_planes(stage)
+        if num_planes == 0:
             print("[WARN] Hospital CollisionPlane not found — check USD prim path")
+        print("[INFO] Hospital environment loaded at /World/hospital")
 
     # Warehouse / office: still loaded post-gym.make (visual-only assets,
     # no robot-overlapping collision geometry).
@@ -563,6 +712,7 @@ def run_sim():
     # First observation collection — triggers the first policy-driven step.
     # Everything above must be fully on stage before this call.
     obs, _ = env.get_observations()
+    prev_actions = None
 
     # simulate environment
     _dbg_step = 0
@@ -571,7 +721,10 @@ def run_sim():
         # run everything in inference mode
         with torch.inference_mode():
             # agent stepping
-            actions = policy(obs)
+            raw_actions = policy(obs)
+            cmd_tensor = _base_command_tensor(env_cfg.scene.num_envs, raw_actions.device)
+            actions = _stabilize_policy_actions(raw_actions, prev_actions, cmd_tensor)
+            prev_actions = actions
             # env stepping
             obs, _, terminated, _ = env.step(actions)
             _dbg_resets += terminated.sum().item()
@@ -585,15 +738,27 @@ def run_sim():
             )
             # move_copter(copter)
 
-            # --- debug: print every 200 steps (~1 s at decimation=4, dt=0.005) ---
+            # --- debug: print early root state so we can distinguish
+            # physics-state corruption from render-only issues ---
             _dbg_step += 1
-            if _dbg_step % 200 == 0 and _dbg_step <= 400:
+            _should_log_dbg = (
+                (_dbg_step <= 50 and _dbg_step % 10 == 0)
+                or (_dbg_step <= 200 and _dbg_step % 50 == 0)
+            )
+            if _should_log_dbg:
                 robot = env.unwrapped.scene["robot"]
                 base_pos    = robot.data.root_pos_w[0].tolist()
+                base_quat   = robot.data.root_quat_w[0].tolist()
                 base_vel    = robot.data.root_lin_vel_w[0].tolist()
                 obs_cmd     = obs[0, 9:12].tolist()
                 act_max     = actions.abs().max().item()
                 max_torque  = robot.data.applied_torque[0].abs().max().item()
+                quat_norm   = float(robot.data.root_quat_w[0].norm().item())
+                state_finite = bool(
+                    torch.isfinite(robot.data.root_pos_w[0]).all()
+                    and torch.isfinite(robot.data.root_quat_w[0]).all()
+                    and torch.isfinite(robot.data.root_lin_vel_w[0]).all()
+                )
                 # Sample first annotator to print beamId range (only first 2 steps)
                 try:
                     _raw = annotator_lst[0]["annotator_object"].get_data()["data"]
@@ -608,10 +773,14 @@ def run_sim():
                     f"[DBG step={_dbg_step}]"
                     f"  cmd={custom_rl_env.base_command}"
                     f"  obs_cmd={[round(v,3) for v in obs_cmd]}"
+                    f"  pos={[round(v,3) for v in base_pos]}"
+                    f"  quat={[round(v,3) for v in base_quat]}"
+                    f"  quat_norm={quat_norm:.4f}"
                     f"  pos_z={base_pos[2]:.4f}"
                     f"  vel_xy={[round(v,3) for v in base_vel[:2]]}"
                     f"  max_action={act_max:.4f}"
                     f"  max_torque={max_torque:.4f}"
+                    f"  finite={state_finite}"
                     f"  total_resets={int(_dbg_resets)}"
                     + _beam_info
                 )

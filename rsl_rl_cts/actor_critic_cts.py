@@ -113,6 +113,7 @@ class ActorCriticCTS(nn.Module):
         init_noise_std: float = 1.0,
         latent_dim: int = 32,
         norm_type: str = "l2norm",
+        value_limit: float = 1000.0,
         **kwargs,
     ):
         if kwargs:
@@ -130,6 +131,7 @@ class ActorCriticCTS(nn.Module):
         self.num_actions = num_actions
         self.num_actor_obs = num_actor_obs
         self.history_length = history_length
+        self.value_limit = value_limit
 
         # Encoders
         self.teacher_encoder = _build_encoder(
@@ -147,6 +149,7 @@ class ActorCriticCTS(nn.Module):
         self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
         self.distribution: Normal | None = None
         Normal.set_default_validate_args = False
+        self._had_nonfinite_action_mean = False
 
         # History buffer (not saved in state_dict – reinitialized at deploy time)
         self._history_num_envs = num_envs
@@ -185,9 +188,20 @@ class ActorCriticCTS(nn.Module):
     def forward(self):
         raise NotImplementedError
 
+    def consume_nonfinite_action_flag(self) -> bool:
+        """Return and clear the actor-output non-finite flag."""
+        had_issue = self._had_nonfinite_action_mean
+        self._had_nonfinite_action_mean = False
+        return had_issue
+
     def _update_distribution(self, latent_and_obs: torch.Tensor) -> None:
         mean = self.actor(latent_and_obs)
-        self.distribution = Normal(mean, mean * 0.0 + self.std)
+        if not torch.isfinite(mean).all():
+            self._had_nonfinite_action_mean = True
+            mean = torch.nan_to_num(mean, nan=0.0, posinf=20.0, neginf=-20.0)
+        mean = mean.clamp(-100.0, 100.0)
+        std = torch.nan_to_num(self.std, nan=1.0, posinf=1.0, neginf=1.0).clamp(1e-6, 10.0)
+        self.distribution = Normal(mean, mean * 0.0 + std)
 
     def act(
         self,
@@ -216,7 +230,13 @@ class ActorCriticCTS(nn.Module):
             latent = self.teacher_encoder(privileged_obs)
         else:
             latent = self.student_encoder(history)
-        return self.critic(torch.cat([latent.detach(), privileged_obs], dim=1))
+        value = self.critic(torch.cat([latent.detach(), privileged_obs], dim=1))
+        # Keep critic outputs in a numerically safe range. Healthy returns in this
+        # task are O(10-100), so a wide tanh bound preserves learning signal while
+        # preventing runaway bootstrap targets from exploding the PPO value loss.
+        if self.value_limit is not None and self.value_limit > 0.0:
+            value = self.value_limit * torch.tanh(value / self.value_limit)
+        return value
 
     # ── Inference (student only) ──────────────────────────────────────────────
 

@@ -87,6 +87,7 @@ class CTSRunner:
         self.tot_timesteps = 0
         self.tot_time = 0.0
         self.current_learning_iteration = 0
+        self.last_good_snapshot = self.alg.snapshot_state()
 
         if log_dir is not None:
             Path(log_dir).mkdir(parents=True, exist_ok=True)
@@ -99,6 +100,28 @@ class CTSRunner:
     ) -> torch.Tensor:
         obs_dict = extras.get("observations", {})
         return obs_dict.get("critic", obs_fallback)
+
+    @staticmethod
+    def _episode_info_from_extras(extras: dict) -> dict | None:
+        """IsaacLab logs episodic stats under ``log``; older runners used ``episode``."""
+        info = extras.get("episode")
+        if info is None:
+            info = extras.get("log")
+        if info is None:
+            return None
+
+        # Move episodic metrics off GPU immediately. Keeping many tiny CUDA
+        # tensors alive across a rollout increases memory pressure and can cause
+        # OOM during the subsequent PPO update.
+        cpu_info: dict[str, float] = {}
+        for key, val in info.items():
+            if isinstance(val, torch.Tensor):
+                if val.numel() == 0:
+                    continue
+                cpu_info[key] = float(val.detach().mean().cpu().item())
+            else:
+                cpu_info[key] = float(val)
+        return cpu_info
 
     # ── Main train loop ───────────────────────────────────────────────────────
 
@@ -142,6 +165,18 @@ class CTSRunner:
             with torch.inference_mode():
                 for _ in range(self.num_steps_per_env):
                     actions = self.alg.act(obs, priv_obs, self.history.flatten(1))
+                    if self.model.consume_nonfinite_action_flag():
+                        print(
+                            "[CTS] Warning: non-finite actor output during rollout; "
+                            "restoring previous weights and retrying action selection.",
+                            flush=True,
+                        )
+                        self.alg.restore_state(self.last_good_snapshot)
+                        actions = self.alg.act(obs, priv_obs, self.history.flatten(1))
+                        if self.model.consume_nonfinite_action_flag():
+                            raise RuntimeError(
+                                "Actor output remained non-finite after restoring the last good snapshot."
+                            )
                     obs, rew, dones, extras = self.env.step(actions)
                     priv_obs = self._priv_from_extras(extras, obs)
                     obs      = obs.to(self.device)
@@ -149,10 +184,14 @@ class CTSRunner:
                     rew      = rew.to(self.device)
                     dones    = dones.to(self.device)
 
-                    # Sanitize (height-scan rays can produce NaN at terrain edges)
-                    obs      = torch.nan_to_num(obs,      nan=0.0, posinf=5.0,  neginf=-5.0)
-                    priv_obs = torch.nan_to_num(priv_obs, nan=0.0, posinf=5.0,  neginf=-5.0)
-                    rew      = torch.nan_to_num(rew,      nan=0.0, posinf=100.0, neginf=-100.0)
+                    # Sanitize (height-scan rays can produce NaN/inf at terrain edges)
+                    obs      = torch.nan_to_num(obs,      nan=0.0, posinf=5.0,   neginf=-5.0)
+                    priv_obs = torch.nan_to_num(priv_obs, nan=0.0, posinf=5.0,   neginf=-5.0)
+                    # nan_to_num(neginf=-100) only catches literal -inf, NOT large
+                    # finite negatives (e.g. -5000 from base_height with ray misses).
+                    # Use nan_to_num first to eliminate NaN/inf, then clamp finite values.
+                    rew = torch.nan_to_num(rew, nan=0.0)
+                    rew = torch.clamp(rew, min=-100.0, max=100.0)
 
                     # History: reset completed envs then append new obs
                     self.history[dones > 0] = 0.0
@@ -161,8 +200,9 @@ class CTSRunner:
                     self.alg.process_env_step(rew, dones, extras)
 
                     # Book-keeping
-                    if "episode" in extras:
-                        ep_infos.append(extras["episode"])
+                    ep_info = self._episode_info_from_extras(extras)
+                    if ep_info:
+                        ep_infos.append(ep_info)
                     cur_rew_sum += rew
                     cur_ep_len  += 1
                     new_ids = (dones > 0).nonzero(as_tuple=False)
@@ -185,8 +225,31 @@ class CTSRunner:
             collection_time = t_learn - t_collect
 
             self.alg.compute_returns(priv_obs, self.history.flatten(1))
+            snapshot = self.alg.snapshot_state()
             mean_value_loss, mean_surrogate_loss, mean_entropy_loss, mean_latent_loss \
                 = self.alg.update()
+            bad_tensors = self.alg.get_nonfinite_state_names()
+            had_bad_actor_output = self.model.consume_nonfinite_action_flag()
+            if bad_tensors or had_bad_actor_output:
+                preview = ", ".join(bad_tensors[:4])
+                suffix = "..." if len(bad_tensors) > 4 else ""
+                reason = []
+                if bad_tensors:
+                    reason.append(f"non-finite state tensors ({preview}{suffix})")
+                if had_bad_actor_output:
+                    reason.append("non-finite actor output")
+                print(
+                    "[CTS] Warning: invalid train state detected after update; "
+                    f"restoring previous weights ({'; '.join(reason)}).",
+                    flush=True,
+                )
+                self.alg.restore_state(snapshot)
+                mean_value_loss = 0.0
+                mean_surrogate_loss = 0.0
+                mean_entropy_loss = 0.0
+                mean_latent_loss = 0.0
+            else:
+                self.last_good_snapshot = self.alg.snapshot_state()
 
             learn_time = time.time() - t_learn
 
@@ -215,11 +278,16 @@ class CTSRunner:
                         "Train/mean_student_reward", statistics.mean(student_rew_buf), it)
                     self.writer.add_scalar(
                         "Train/mean_student_ep_len", statistics.mean(student_len_buf), it)
-                # Per-reward breakdown
-                for ep_info in ep_infos:
-                    for key, val in ep_info.items():
-                        v = val.mean().item() if isinstance(val, torch.Tensor) else float(val)
-                        self.writer.add_scalar(f"Metrics/{key}", v, it)
+                # Episodic breakdown (reward terms, terrain stats, etc.)
+                if ep_infos:
+                    metrics: dict[str, list[float]] = {}
+                    for ep_info in ep_infos:
+                        for key, val in ep_info.items():
+                            metrics.setdefault(key, []).append(val)
+                    for key, values in metrics.items():
+                        mean_val = statistics.mean(values)
+                        prefix = "Terrain" if "terrain" in key else "Episode"
+                        self.writer.add_scalar(f"{prefix}/{key}", mean_val, it)
 
             # ── Console log every 50 iters ────────────────────────────────────
             done = it - start_it + 1

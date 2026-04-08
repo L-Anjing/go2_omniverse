@@ -68,6 +68,44 @@ def constant_commands(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
     return tensor_lst
 
 
+def stair_deploy_commands(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
+    """Clamp deploy commands to the stair-terrain support of training.
+
+    Keep deploy-time commands inside the training support:
+      lin_vel_x in [-1.0, 1.0]
+      lin_vel_y in [-1.0, 1.0]
+      ang_vel_z in [-1.5, 1.5]
+    """
+    cmds = constant_commands(env)
+    cmds[:, 0] = cmds[:, 0].clamp(-1.0, 1.0)
+    cmds[:, 1] = cmds[:, 1].clamp(-1.0, 1.0)
+    cmds[:, 2] = cmds[:, 2].clamp(-1.5, 1.5)
+    return cmds
+
+
+def stair_scaled_base_ang_vel(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
+    return mdp.base_ang_vel(env) * 0.25
+
+
+def stair_scaled_base_lin_vel(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
+    return mdp.base_lin_vel(env) * 2.0
+
+
+def stair_scaled_velocity_commands(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
+    cmds = stair_deploy_commands(env)[:, :3]
+    scale = torch.tensor([2.0, 2.0, 0.25], device=cmds.device, dtype=cmds.dtype)
+    return cmds * scale
+
+
+def stair_scaled_joint_vel(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
+    return mdp.joint_vel_rel(env) * 0.05
+
+
+def stair_scaled_height_scan(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
+    heights = mdp.height_scan(env, sensor_cfg=SceneEntityCfg("height_scanner")).clamp(-1.0, 1.0)
+    return heights * 2.5
+
+
 @configclass
 class MySceneCfg(InteractiveSceneCfg):
     """Configuration for the terrain scene with a legged robot."""
@@ -78,12 +116,6 @@ class MySceneCfg(InteractiveSceneCfg):
         terrain_type="plane",
         debug_vis=False,
     )
-
-    # Optional custom environment USD (hospital, warehouse, etc.).
-    # Set to an AssetBaseCfg before gym.make() to load it as part of the
-    # initial scene composition — before PhysX starts its first broad-phase.
-    # None means no custom env (default flat ground only).
-    custom_env: AssetBaseCfg | None = None
 
     # robots
     robot: ArticulationCfg = MISSING
@@ -344,8 +376,9 @@ class UnitreeGo2CustomEnvCfg(LocomotionVelocityRoughEnvCfg):
 class Go2StairDeployCfg(UnitreeGo2CustomEnvCfg):
     """Deployment env for the Go2 CTS stair-climbing policy.
 
-    The CTS student was trained with Go2StairPolicyCfg (train_stairs.py):
-      ang_vel(3) + gravity(3) + cmd(3) + joint_pos(12) + joint_vel(12) + actions(12) = 45D
+    The CTS student was trained with scaled 45D proprioceptive observations:
+      ang_vel*0.25(3) + gravity(3) + cmd*[2,2,0.25](3) +
+      joint_pos(12) + joint_vel*0.05(12) + actions(12) = 45D
       - NO base_lin_vel (matches real-robot deployability)
       - NO height_scan  (student infers terrain from motion history)
 
@@ -359,11 +392,11 @@ class Go2StairDeployCfg(UnitreeGo2CustomEnvCfg):
 
         @configclass
         class PolicyCfg(ObsGroup):
-            base_ang_vel      = ObsTerm(func=mdp.base_ang_vel)
+            base_ang_vel      = ObsTerm(func=stair_scaled_base_ang_vel)
             projected_gravity = ObsTerm(func=mdp.projected_gravity)
-            velocity_commands = ObsTerm(func=constant_commands)
+            velocity_commands = ObsTerm(func=stair_scaled_velocity_commands)
             joint_pos         = ObsTerm(func=mdp.joint_pos_rel)
-            joint_vel         = ObsTerm(func=mdp.joint_vel_rel)
+            joint_vel         = ObsTerm(func=stair_scaled_joint_vel)
             actions           = ObsTerm(func=mdp.last_action)
 
             def __post_init__(self):
@@ -376,6 +409,44 @@ class Go2StairDeployCfg(UnitreeGo2CustomEnvCfg):
 
     def __post_init__(self):
         super().__post_init__()
+        # Match the training action pipeline. UnitreeGo2RoughEnvCfg reduces the
+        # joint position action scale from 0.5 to 0.25; deploy must do the same.
+        self.actions.joint_pos.scale = 0.25
+
+
+@configclass
+class Go2FullSceneDeployCfg(UnitreeGo2CustomEnvCfg):
+    """Deployment env for the full-scene CTS policy.
+
+    This actor keeps base linear velocity available at deploy time so the
+    locomotion controller can handle mixed flat + stair indoor geometry:
+      base_lin_vel*2.0 + base_ang_vel*0.25 + gravity +
+      cmd*[2,2,0.25] + joint_pos + joint_vel*0.05 + actions = 48D
+    """
+
+    @configclass
+    class Go2FullSceneDeployObsCfg(ObservationsCfg):
+        @configclass
+        class PolicyCfg(ObsGroup):
+            base_lin_vel      = ObsTerm(func=stair_scaled_base_lin_vel)
+            base_ang_vel      = ObsTerm(func=stair_scaled_base_ang_vel)
+            projected_gravity = ObsTerm(func=mdp.projected_gravity)
+            velocity_commands = ObsTerm(func=stair_scaled_velocity_commands)
+            joint_pos         = ObsTerm(func=mdp.joint_pos_rel)
+            joint_vel         = ObsTerm(func=stair_scaled_joint_vel)
+            actions           = ObsTerm(func=mdp.last_action)
+
+            def __post_init__(self):
+                self.enable_corruption = False
+                self.concatenate_terms = True
+
+        policy: PolicyCfg = PolicyCfg()
+
+    observations: Go2FullSceneDeployObsCfg = Go2FullSceneDeployObsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.actions.joint_pos.scale = 0.25
 
 
 @configclass

@@ -43,10 +43,14 @@ eval "$(conda shell.bash hook)"
 conda activate env_isaaclab
 
 # 4. 运行参数配置
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-unitree_go2_stairs}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-unitree_go2_fullscene_cts/seed_123}"
 LOAD_RUN="${LOAD_RUN:-.*}"
-CHECKPOINT="${CHECKPOINT:-model_2800.pt}"
+CHECKPOINT="${CHECKPOINT:-model_3000.pt}"
 CMD_SOURCE="${CMD_SOURCE:-keyboard}"
+VIEWER_FOLLOW="${VIEWER_FOLLOW:-off}"
+ACTION_SMOOTHING="${ACTION_SMOOTHING:-0.15}"
+ZERO_CMD_STANCE_BLEND="${ZERO_CMD_STANCE_BLEND:-0.35}"
+ZERO_CMD_THRESHOLD="${ZERO_CMD_THRESHOLD:-0.05}"
 
 # 5. 启动主程序
 echo "[INFO] Launching main simulation..."
@@ -59,6 +63,10 @@ python main.py \
     --enable_cameras \
     --custom_env hospital \
     --cmd_source "${CMD_SOURCE}" \
+    --viewer_follow "${VIEWER_FOLLOW}" \
+    --action_smoothing "${ACTION_SMOOTHING}" \
+    --zero_cmd_stance_blend "${ZERO_CMD_STANCE_BLEND}" \
+    --zero_cmd_threshold "${ZERO_CMD_THRESHOLD}" \
     --experiment_name "${EXPERIMENT_NAME}" \
     --load_run "${LOAD_RUN}" \
-    --checkpoint "${CHECKPOINT}"
+    --checkpoint "${CHECKPOINT}" \

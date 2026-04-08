@@ -95,19 +95,42 @@ class RolloutStorageCTS:
 
     # ── Returns / advantages ──────────────────────────────────────────────────
 
-    def compute_returns(self, last_values: torch.Tensor, gamma: float, lam: float) -> None:
+    def compute_returns(
+        self,
+        last_values: torch.Tensor,
+        gamma: float,
+        lam: float,
+        value_limit: float | None = None,
+    ) -> None:
+        def _safe(x: torch.Tensor) -> torch.Tensor:
+            x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+            if value_limit is not None and value_limit > 0.0:
+                x = x.clamp(-value_limit, value_limit)
+            return x
+
+        last_values = _safe(last_values)
         advantage = 0
         for step in reversed(range(self.num_transitions_per_env)):
             next_values = last_values if step == self.num_transitions_per_env - 1 \
                 else self.values[step + 1]
+            next_values = _safe(next_values)
+            rewards = torch.clamp(
+                torch.nan_to_num(self.rewards[step], nan=0.0, posinf=0.0, neginf=0.0),
+                min=-100.0,
+                max=100.0,
+            )
+            values = _safe(self.values[step])
             not_terminal = 1.0 - self.dones[step].float()
-            delta = self.rewards[step] + not_terminal * gamma * next_values - self.values[step]
+            delta = rewards + not_terminal * gamma * next_values - values
             advantage = delta + not_terminal * gamma * lam * advantage
-            self.returns[step] = advantage + self.values[step]
+            advantage = _safe(advantage)
+            self.returns[step] = _safe(advantage + values)
 
         self.advantages = self.returns - self.values
+        self.advantages = torch.nan_to_num(self.advantages, nan=0.0, posinf=0.0, neginf=0.0)
         self.advantages = (self.advantages - self.advantages.mean()) / \
                           (self.advantages.std() + 1e-8)
+        self.advantages = torch.nan_to_num(self.advantages, nan=0.0, posinf=0.0, neginf=0.0)
 
     def get_statistics(self):
         done = self.dones
