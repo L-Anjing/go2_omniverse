@@ -15,6 +15,7 @@ The original asset is NOT modified.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -111,10 +112,11 @@ def apply_label(prim: Usd.Prim, label: str) -> None:
 
 
 def main() -> None:
-    HOSPITAL_USD = (
-        "/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5/"
-        "Isaac/Environments/Hospital/hospital.usd"
+    _assets_root = os.environ.get(
+        "ISAAC_ASSETS_ROOT",
+        "/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5",
     )
+    HOSPITAL_USD = os.path.join(_assets_root, "Isaac/Environments/Hospital/hospital.usd")
 
     output_path = Path(args.output)
     if not output_path.is_absolute():

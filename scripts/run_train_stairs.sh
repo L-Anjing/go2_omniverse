@@ -18,6 +18,12 @@
 # Stop:
 #   kill $(cat logs/train_stairs_logs/train_gpu0.pid) $(cat logs/train_stairs_logs/train_gpu1.pid)
 
+# ── 换机器时修改这两行 ────────────────────────────────────────────────────────
+ISAAC_ASSETS_ROOT="${ISAAC_ASSETS_ROOT:-/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-env_isaaclab}"
+export ISAAC_ASSETS_ROOT CONDA_ENV_NAME
+# ─────────────────────────────────────────────────────────────────────────────
+
 NUM_ENVS=${1:-4096}
 MAX_ITER=${2:-150000}
 MAX_SAFE_ENVS=4096
@@ -39,7 +45,7 @@ cd "$REPO_ROOT"
 mkdir -p logs/train_stairs_logs
 
 eval "$(conda shell.bash hook)"
-conda activate env_isaaclab
+conda activate "${CONDA_ENV_NAME}"
 
 # GPU 0 — seed 123
 nohup env CUDA_VISIBLE_DEVICES=0 python train_stairs.py \

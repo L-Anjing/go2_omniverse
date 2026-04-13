@@ -388,8 +388,12 @@ class UnitreeGo2CustomEnvCfg(LocomotionVelocityRoughEnvCfg):
         super().__post_init__()
 
         self.scene.robot = UNITREE_GO2_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-        self.scene.robot.spawn.usd_path = (
-            "/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5/Isaac/IsaacLab/Robots/Unitree/Go2/go2.usd"
+        _assets_root = os.environ.get(
+            "ISAAC_ASSETS_ROOT",
+            "/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5",
+        )
+        self.scene.robot.spawn.usd_path = os.path.join(
+            _assets_root, "Isaac/IsaacLab/Robots/Unitree/Go2/go2.usd"
         )
         # UNITREE_GO2_CFG init_state.pos z=0.4 puts feet ~9cm above a flat plane,
         # causing a hard impact at spawn that corrupts the initial observation with

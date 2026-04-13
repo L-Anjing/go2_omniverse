@@ -28,6 +28,12 @@ build_and_source_ws() {
     popd > /dev/null
 }
 
+# ── 换机器时修改这两行 ────────────────────────────────────────────────────────
+ISAAC_ASSETS_ROOT="${ISAAC_ASSETS_ROOT:-/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5}"
+CONDA_ENV_NAME="${CONDA_ENV_NAME:-env_isaaclab}"
+export ISAAC_ASSETS_ROOT CONDA_ENV_NAME
+# ─────────────────────────────────────────────────────────────────────────────
+
 # 3. 环境与依赖初始化
 echo "[INFO] Setting up environment..."
 
@@ -40,7 +46,7 @@ build_and_source_ws "${REPO_ROOT}/go2_omniverse_ws"
 
 # 3.3 激活 Conda 虚拟环境
 eval "$(conda shell.bash hook)"
-conda activate env_isaaclab
+conda activate "${CONDA_ENV_NAME}"
 
 # 4. 运行参数配置
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-unitree_go2_fullscene_cts/seed_123}"

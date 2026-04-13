@@ -485,9 +485,12 @@ def setup_custom_env():
             # Absolute path to the hospital asset bundle.
             # Materials/ and Props/ are referenced as relative layers inside
             # hospital.usd and are resolved automatically by the USD runtime.
-            HOSPITAL_USD = (
-                "/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5/"
-                "Isaac/Environments/Hospital/hospital.usd"
+            _assets_root = os.environ.get(
+                "ISAAC_ASSETS_ROOT",
+                "/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5",
+            )
+            HOSPITAL_USD = os.path.join(
+                _assets_root, "Isaac/Environments/Hospital/hospital.usd"
             )
             cfg_scene = sim_utils.UsdFileCfg(usd_path=HOSPITAL_USD)
             cfg_scene.func("/World/hospital", cfg_scene, translation=(0.0, 0.0, 0.0))
