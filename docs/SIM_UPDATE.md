@@ -91,8 +91,8 @@
 3. 这些参数只用于缓解部署抖动，不替代训练修复。
 
 ### v0.20
-1. 修复 hospital pre-gym.make 加载导致的 "scene can't load"：hospital CollisionPlane 参与 PhysX 初始 broad-phase 与 `/World/ground` 冲突；改回 post-gym.make 方式加载并立即停用重复地面 prim。
-2. 删除 `MySceneCfg.custom_env` 字段（pre-gym.make 方案遗留，不再使用）。
+1. 修复 hospital 加载两难：post-gym.make 导致碰撞体与机器人重叠（`base_contact` 每步触发）；pre-gym.make 导致 CollisionPlane 在 PhysX broad-phase 里崩溃。
+2. 最终方案：新增 `_spawn_hospital_usd()` 自定义 spawner，在 USD 加载后、PhysX broad-phase 前立即停用 CollisionPlane，恢复 pre-gym.make 路径。
 3. 补记 v0.17 漏记：48D CTS 指令速度上限自动收窄到 `lin=1.0 m/s / yaw=1.0 rad/s`。
 
 ### v0.21

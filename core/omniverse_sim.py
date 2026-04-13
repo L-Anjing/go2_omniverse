@@ -538,6 +538,29 @@ def _deactivate_hospital_collision_planes(stage) -> int:
     return deactivated
 
 
+def _spawn_hospital_usd(prim_path: str, cfg, translation=None, orientation=None):
+    """Spawn hospital USD and immediately deactivate its duplicate ground plane.
+
+    Using this as the spawn func inside AssetBaseCfg lets us load the hospital
+    BEFORE gym.make() (so robot and scene appear simultaneously) while still
+    removing the CollisionPlane before PhysX runs its first broad-phase reset.
+
+    Without this, two coincident collision planes exist during PhysX init and
+    crash scene loading.  Without pre-gym.make loading, hospital collision meshes
+    appear mid-episode and trigger base_contact every step.
+    """
+    from isaaclab.sim.spawners.from_files import spawn_from_usd
+    import omni.usd
+    prim = spawn_from_usd(prim_path, cfg, translation=translation, orientation=orientation)
+    stage = omni.usd.get_context().get_stage()
+    num_planes = _deactivate_hospital_collision_planes(stage)
+    if num_planes == 0:
+        print("[WARN] Hospital CollisionPlane not found during spawn — check USD prim path")
+    else:
+        print(f"[INFO] Hospital spawned and {num_planes} duplicate ground prim(s) deactivated")
+    return prim
+
+
 def cmd_vel_cb(msg, num_robot):
     x = msg.linear.x
     y = msg.linear.y
@@ -648,30 +671,25 @@ def run_sim():
     env_cfg.scene.num_envs = args_cli.robot_amount
     specify_cmd_for_robots(env_cfg.scene.num_envs)
 
+    # --- Hospital: inject BEFORE gym.make() via custom spawner -----------------
+    # _spawn_hospital_usd deactivates the hospital's internal CollisionPlane
+    # immediately after loading the USD, so PhysX never sees two coincident
+    # ground planes during its first broad-phase reset (which happens inside
+    # gym.make).  This gives correct load order (scene + robot appear together)
+    # and avoids the base_contact-every-step bug from post-gym.make loading.
+    if args_cli.custom_env == "hospital":
+        HOSPITAL_USD = str(REPO_ROOT / "assets" / "env" / "hospital_labeled.usd")
+        hospital_spawn_cfg = sim_utils.UsdFileCfg(usd_path=HOSPITAL_USD)
+        hospital_spawn_cfg.func = _spawn_hospital_usd
+        env_cfg.scene.custom_env = AssetBaseCfg(
+            prim_path="/World/hospital",
+            spawn=hospital_spawn_cfg,
+        )
+
     # create isaac environment (scene load + robot spawn; physics starts here)
     env = gym.make(args_cli.task, cfg=env_cfg)
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env)
-
-    # --- Hospital: load AFTER gym.make() so PhysX broad-phase is already done --
-    # Loading hospital as an AssetBaseCfg BEFORE gym.make() causes the hospital's
-    # built-in CollisionPlane to participate in PhysX's initial broad-phase along
-    # with IsaacLab's /World/ground plane.  Two coincident collision planes make
-    # PhysX scene initialisation fail ("scene can't load").
-    # Loading it post-gym.make() means the hospital collision meshes are added to
-    # a running PhysX scene; we immediately deactivate any duplicate ground planes
-    # so they are removed from the next broad-phase update.  The robot interacts
-    # with the hospital walls/floors via the hospital's non-plane collision meshes.
-    if args_cli.custom_env == "hospital":
-        HOSPITAL_USD = str(REPO_ROOT / "assets" / "env" / "hospital_labeled.usd")
-        cfg_scene = sim_utils.UsdFileCfg(usd_path=HOSPITAL_USD)
-        cfg_scene.func("/World/hospital", cfg_scene, translation=(0.0, 0.0, 0.0))
-        import omni.usd as _omni_usd  # noqa: PLC0415 — available only at runtime
-        stage = _omni_usd.get_context().get_stage()
-        num_planes = _deactivate_hospital_collision_planes(stage)
-        if num_planes == 0:
-            print("[WARN] Hospital CollisionPlane not found — check USD prim path")
-        print("[INFO] Hospital environment loaded at /World/hospital")
 
     # Warehouse / office: still loaded post-gym.make (visual-only assets,
     # no robot-overlapping collision geometry).
@@ -714,6 +732,11 @@ def run_sim():
     obs, _ = env.get_observations()
     prev_actions = None
 
+    # Log initial observation stats before any policy step
+    print(f"[DBG init] obs min={obs.min().item():.4f}  max={obs.max().item():.4f}  "
+          f"mean={obs.mean().item():.4f}  finite={torch.isfinite(obs).all().item()}")
+    print(f"[DBG init] obs={obs[0].tolist()}")
+
     # simulate environment
     _dbg_step = 0
     _dbg_resets = 0
@@ -742,7 +765,8 @@ def run_sim():
             # physics-state corruption from render-only issues ---
             _dbg_step += 1
             _should_log_dbg = (
-                (_dbg_step <= 50 and _dbg_step % 10 == 0)
+                (_dbg_step <= 5)
+                or (_dbg_step <= 50 and _dbg_step % 10 == 0)
                 or (_dbg_step <= 200 and _dbg_step % 50 == 0)
             )
             if _should_log_dbg:
@@ -784,5 +808,8 @@ def run_sim():
                     f"  total_resets={int(_dbg_resets)}"
                     + _beam_info
                 )
+                if _dbg_step <= 5:
+                    print(f"[DBG step={_dbg_step}] actions={[round(v,4) for v in actions[0].tolist()]}")
+                    print(f"[DBG step={_dbg_step}] obs={[round(v,4) for v in obs[0].tolist()]}")
 
     env.close()

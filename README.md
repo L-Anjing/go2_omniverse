@@ -2,6 +2,7 @@
 
 Forked from https://github.com/abizovnuralem/go2_omniverse  
 Reference repo https://github.com/wty-yy/go2_rl_gym
+Reference repo https://github.com/ZiwenZhuang/parkour?tab=readme-ov-file
 
 ---
 
@@ -80,7 +81,7 @@ tail -f logs/train_stairs_logs/train_gpu1.log | grep -E '\[CTS|ERROR|Traceback'
 
 ### 停止双卡训练
 ```bash
-kill $(cat logs/train_stairs_logs/train_gpu0.pid) $(cat logs/train_stairs_logs/train_gpu1.pid)
+kill -9 -$(cat logs/train_stairs_logs/train_gpu0.pid) -$(cat logs/train_stairs_logs/train_gpu1.pid)
 ```
 
 ## ROS2 话题

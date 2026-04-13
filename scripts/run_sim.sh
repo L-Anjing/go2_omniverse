@@ -45,7 +45,7 @@ conda activate env_isaaclab
 # 4. 运行参数配置
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-unitree_go2_fullscene_cts/seed_123}"
 LOAD_RUN="${LOAD_RUN:-.*}"
-CHECKPOINT="${CHECKPOINT:-model_3000.pt}"
+CHECKPOINT="${CHECKPOINT:-model_17500.pt}"
 CMD_SOURCE="${CMD_SOURCE:-keyboard}"
 VIEWER_FOLLOW="${VIEWER_FOLLOW:-off}"
 ACTION_SMOOTHING="${ACTION_SMOOTHING:-0.15}"

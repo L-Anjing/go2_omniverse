@@ -247,6 +247,83 @@ def _curriculum_value(current_iter: int, cfg: dict[str, float | int]) -> float:
     return start_value + alpha * (end_value - start_value)
 
 
+LIN_VEL_Z_REWARD_CURRICULUM = {
+    "start_iter": 0,
+    "end_iter": 1500,
+    "start_value": 1.0,
+    "end_value": 0.0,
+}
+
+BASE_HEIGHT_REWARD_CURRICULUM = {
+    "start_iter": 0,
+    "end_iter": 5000,
+    "start_value": 1.0,
+    "end_value": 10.0,
+}
+
+DYNAMIC_TRACKING_SIGMA_CFG = {
+    "default_sigma": 0.25,
+    "min_lin_vel": 0.5,
+    "max_lin_vel": 1.5,
+    "min_ang_vel": 1.0,
+    "max_ang_vel": 2.0,
+    # [wave, slope, rough_slope, stairs_up, stairs_down, obstacles, flat]
+    "max_sigma": [5 / 12, 1 / 4, 1 / 4, 1 / 2, 1 / 2, 3 / 4, 1 / 4],
+}
+
+
+def _current_training_iter(env, default_steps_per_iteration: int = 48) -> int:
+    """Resolve the current training iteration from the command term when possible."""
+    steps_per_iteration = default_steps_per_iteration
+    command_manager = getattr(env, "command_manager", None)
+    if command_manager is not None:
+        command_term = command_manager.get_term("base_velocity")
+        steps_per_iteration = max(
+            int(getattr(getattr(command_term, "cfg", None), "steps_per_iteration", default_steps_per_iteration)),
+            1,
+        )
+    return int(env.common_step_counter // steps_per_iteration)
+
+
+def _reward_curriculum_scale(env, cfg: dict[str, float | int]) -> float:
+    """Return the reference-aligned curriculum scale for the current training step."""
+    return _curriculum_value(_current_training_iter(env), cfg)
+
+
+def _terrain_dynamic_sigma(
+    env,
+    target_vel_abs: torch.Tensor,
+    *,
+    default_sigma: float,
+    min_vel: float,
+    max_vel: float,
+    max_sigma: list[float],
+) -> torch.Tensor:
+    """Dynamic tracking sigma from go2_rl_gym, adapted to IsaacLab terrain IDs."""
+    sigma = torch.full_like(target_vel_abs, default_sigma)
+    terrain = getattr(env.scene, "terrain", None)
+    terrain_types = getattr(terrain, "terrain_types", None)
+    if terrain_types is None:
+        return sigma
+
+    max_sigma_tensor = torch.tensor(max_sigma, device=target_vel_abs.device, dtype=target_vel_abs.dtype)
+    terrain_ids = terrain_types.to(dtype=torch.long).clamp_(0, len(max_sigma) - 1)
+    target_sigma = max_sigma_tensor[terrain_ids]
+
+    if max_vel > min_vel:
+        interp_mask = (target_vel_abs >= min_vel) & (target_vel_abs < max_vel)
+        ratio = (target_vel_abs[interp_mask] - min_vel) / (max_vel - min_vel)
+        sigma[interp_mask] = default_sigma + ratio * (target_sigma[interp_mask] - default_sigma)
+    sigma[target_vel_abs >= max_vel] = target_sigma[target_vel_abs >= max_vel]
+
+    terrain_levels = getattr(terrain, "terrain_levels", None)
+    if terrain_levels is not None:
+        level_scale = torch.clamp(torch.exp((terrain_levels.float() + 1.0) / 10.0) - 1.0, max=1.0)
+        sigma = default_sigma + level_scale.to(dtype=target_vel_abs.dtype) * (sigma - default_sigma)
+
+    return sigma
+
+
 class StairVelocityCommand(UniformVelocityCommand):
     """Velocity command generator with go2_rl_gym-style curricula."""
 
@@ -282,6 +359,8 @@ class StairVelocityCommand(UniformVelocityCommand):
         self._apply_command_range_curriculum(force=True)
         self.metrics["command_resamples"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["zero_command_prob"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["front_air_ratio_moving"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["double_front_air_ratio_moving"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["rear_air_ratio"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["rear_air_ratio_moving"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["rear_air_ratio_standing"] = torch.zeros(self.num_envs, device=self.device)
@@ -289,6 +368,8 @@ class StairVelocityCommand(UniformVelocityCommand):
         self.metrics["front_rear_contact_imbalance_moving"] = torch.zeros(self.num_envs, device=self.device)
 
         metric_names = (
+            "front_air_ratio_moving",
+            "double_front_air_ratio_moving",
             "rear_air_ratio",
             "rear_air_ratio_moving",
             "rear_air_ratio_standing",
@@ -585,7 +666,9 @@ class StairVelocityCommand(UniformVelocityCommand):
 
         front_contacts = in_contact[:, :2].sum(dim=1).float()
         rear_contacts = in_contact[:, 2:].sum(dim=1).float()
+        front_air_ratio = (~in_contact[:, :2]).float().mean(dim=1)
         rear_air_ratio = (~in_contact[:, 2:]).float().mean(dim=1)
+        double_front_air = (front_contacts == 0.0).float()
         double_rear_air = (rear_contacts == 0.0).float()
         front_rear_imbalance = torch.abs(front_contacts - rear_contacts) / 2.0
 
@@ -593,6 +676,12 @@ class StairVelocityCommand(UniformVelocityCommand):
         body_vel = torch.linalg.norm(self.robot.data.root_lin_vel_b[:, :2], dim=1)
         moving = cmd_norm > 0.1
         standing = (cmd_norm < 0.1) & (body_vel < 0.2)
+
+        self._gait_metric_sums["front_air_ratio_moving"] += front_air_ratio * moving.float()
+        self._gait_metric_counts["front_air_ratio_moving"] += moving.float()
+
+        self._gait_metric_sums["double_front_air_ratio_moving"] += double_front_air * moving.float()
+        self._gait_metric_counts["double_front_air_ratio_moving"] += moving.float()
 
         self._gait_metric_sums["rear_air_ratio"] += rear_air_ratio
         self._gait_metric_counts["rear_air_ratio"] += 1.0
@@ -779,6 +868,83 @@ def _safe_terrain_base_height_l2(
     return torch.square(asset.data.root_pos_w[:, 2] - adjusted_target)
 
 
+def _curriculum_scaled_lin_vel_z_l2(
+    env,
+    curriculum_cfg: dict[str, float | int],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reference reward curriculum: fade out vertical-velocity penalty early."""
+    scale = _reward_curriculum_scale(env, curriculum_cfg)
+    return mdp.lin_vel_z_l2(env, asset_cfg=asset_cfg) * scale
+
+
+def _curriculum_scaled_base_height_l2(
+    env,
+    target_height: float,
+    sensor_cfg: SceneEntityCfg,
+    curriculum_cfg: dict[str, float | int],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Reference reward curriculum: ramp terrain-relative base-height constraint."""
+    scale = _reward_curriculum_scale(env, curriculum_cfg)
+    return _safe_terrain_base_height_l2(
+        env,
+        target_height=target_height,
+        sensor_cfg=sensor_cfg,
+        asset_cfg=asset_cfg,
+    ) * scale
+
+
+def _track_lin_vel_xy_dynamic_exp(
+    env,
+    command_name: str,
+    sigma_cfg: dict[str, float | list[float]],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Velocity tracking with go2_rl_gym dynamic sigma for hard terrain / fast commands."""
+    asset = env.scene[asset_cfg.name]
+    commands = env.command_manager.get_command(command_name)
+    vel_error_sq = torch.square(commands[:, :2] - asset.data.root_lin_vel_b[:, :2])
+    sigma_x = _terrain_dynamic_sigma(
+        env,
+        torch.abs(commands[:, 0]),
+        default_sigma=float(sigma_cfg["default_sigma"]),
+        min_vel=float(sigma_cfg["min_lin_vel"]),
+        max_vel=float(sigma_cfg["max_lin_vel"]),
+        max_sigma=list(sigma_cfg["max_sigma"]),
+    )
+    sigma_y = _terrain_dynamic_sigma(
+        env,
+        torch.abs(commands[:, 1]),
+        default_sigma=float(sigma_cfg["default_sigma"]),
+        min_vel=float(sigma_cfg["min_lin_vel"]),
+        max_vel=float(sigma_cfg["max_lin_vel"]),
+        max_sigma=list(sigma_cfg["max_sigma"]),
+    )
+    return torch.nan_to_num(torch.exp(-(vel_error_sq[:, 0] / sigma_x + vel_error_sq[:, 1] / sigma_y)), nan=0.0)
+
+
+def _track_ang_vel_z_dynamic_exp(
+    env,
+    command_name: str,
+    sigma_cfg: dict[str, float | list[float]],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Yaw tracking with go2_rl_gym dynamic sigma for hard terrain / fast commands."""
+    asset = env.scene[asset_cfg.name]
+    commands = env.command_manager.get_command(command_name)
+    ang_vel_error_sq = torch.square(commands[:, 2] - asset.data.root_ang_vel_b[:, 2])
+    sigma = _terrain_dynamic_sigma(
+        env,
+        torch.abs(commands[:, 2]),
+        default_sigma=float(sigma_cfg["default_sigma"]),
+        min_vel=float(sigma_cfg["min_ang_vel"]),
+        max_vel=float(sigma_cfg["max_ang_vel"]),
+        max_sigma=list(sigma_cfg["max_sigma"]),
+    )
+    return torch.nan_to_num(torch.exp(-ang_vel_error_sq / sigma), nan=0.0)
+
+
 def _feet_regulation_reward(
     env,
     asset_cfg: SceneEntityCfg,
@@ -877,6 +1043,14 @@ def _stand_still_joint_penalty(
     return joint_dev * should_stand.float()
 
 
+def _joint_power_l1(env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """L1 joint power penalty: sum(|τ · q̇|). Matches go2_rl_gym dof_power reward."""
+    asset = env.scene[asset_cfg.name]
+    torques = asset.data.applied_torque[:, asset_cfg.joint_ids]
+    vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
+    return torch.nan_to_num((torques * vel).abs().sum(dim=1), nan=0.0)
+
+
 def _airborne_torque_penalty(
     env,
     asset_cfg: SceneEntityCfg,
@@ -913,6 +1087,35 @@ def _airborne_torque_penalty(
     airborne = ~in_contact                                                # (N, 4)
 
     return (torque_sq_per_leg * airborne.float()).sum(dim=1)
+
+
+def _leg_airborne_duration_penalty(
+    env,
+    sensor_cfg: SceneEntityCfg,
+    cmd_threshold: float = 0.1,
+    duration_threshold: float = 0.3,
+) -> torch.Tensor:
+    """Penalize any leg for accumulated airborne time above a threshold.
+
+    Unlike ``feet_air_time`` (which fires only on re-contact), this term applies
+    every step a foot stays airborne beyond ``duration_threshold`` seconds.
+    Applied symmetrically to all four legs so the policy cannot game the penalty
+    by shifting the hover exploit from rear legs to front legs.
+
+    Observed failure modes this closes:
+      - Persistent single rear-leg hover  (rear_air_ratio_moving = 58.6%)
+      - Front-leg wheelbarrow gait        (front_air_ratio_moving = 36.5%)
+      - Bilateral synchronised jumps      (double_*_air_ratio > 10%)
+    """
+    sensor = env.scene.sensors[sensor_cfg.name]
+    # current_air_time > 0 accumulates while the foot is off the ground
+    air_time = sensor.data.current_air_time[:, sensor_cfg.body_ids]  # (N, 4)
+    excess = torch.clamp(air_time - duration_threshold, min=0.0)     # (N, 4)
+    penalty = excess.sum(dim=1)                                       # (N,)
+    moving = torch.linalg.norm(
+        env.command_manager.get_command("base_velocity")[:, :2], dim=1
+    ) > cmd_threshold
+    return penalty * moving.float()
 
 
 def _front_rear_support_balance_penalty(
@@ -1070,7 +1273,7 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
             prim_path="/World/ground",
             terrain_type="generator",
             terrain_generator=STAIRS_MIXED_TERRAIN_CFG,
-            max_init_terrain_level=5,
+            max_init_terrain_level=2,
             collision_group=-1,
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 friction_combine_mode="multiply",
@@ -1132,7 +1335,7 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
         # ── Terminations ─────────────────────────────────────────────────────
         self.terminations.bad_orientation = DoneTerm(
             func=mdp.bad_orientation,
-            params={"limit_angle": 0.87},  # ~50°
+            params={"limit_angle": 1.2},
         )
 
         # ── Rewards ───────────────────────────────────────────────────────────
@@ -1163,10 +1366,21 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
         # flat_orientation_l2: left at default 0.0 (disabled).
         #   Go2RoughEnvCfg disables it; stair climbing requires body pitch → penalising
         #   it directly opposes the target task.
-        # dof_pos_limits: left at default 0.0 (disabled).
-        #   Default is disabled; enabling it at high weight causes large penalties at
-        #   init when joints start at random positions.
-        self.rewards.lin_vel_z_l2.weight    = -0.04    # go2_rl_gym: -2.0  × 0.02
+        # dof_pos_limits: go2_rl_gym uses -2.0 (effective -0.04), but enabling at
+        #   high weight causes large penalties when joints start at random positions
+        #   during reset, so kept at low safe weight.
+        self.rewards.dof_pos_limits = RewTerm(
+            func=mdp.joint_pos_limits,
+            weight=-0.04,  # go2_rl_gym: -2.0 × 0.02
+        )
+        self.rewards.lin_vel_z_l2 = RewTerm(
+            func=_curriculum_scaled_lin_vel_z_l2,
+            weight=-0.04,  # go2_rl_gym: -2.0 × 0.02
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "curriculum_cfg": LIN_VEL_Z_REWARD_CURRICULUM,
+            },
+        )
         self.rewards.ang_vel_xy_l2.weight   = -0.001   # go2_rl_gym: -0.05 × 0.02
         self.rewards.dof_torques_l2.weight  = -2.0e-6  # go2_rl_gym: -1e-4 × 0.02
         self.rewards.dof_acc_l2.weight      = -5.0e-9  # go2_rl_gym: -2.5e-7 × 0.02
@@ -1176,13 +1390,29 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
             weight=-0.0002,
         )
 
-        # Velocity tracking (main task signal — keep IsaacLab-calibrated, not × 0.02)
-        self.rewards.track_lin_vel_xy_exp.weight = 1.5
-        self.rewards.track_ang_vel_z_exp.weight  = 0.75
+        # Velocity tracking with go2_rl_gym dynamic sigma.
+        self.rewards.track_lin_vel_xy_exp = RewTerm(
+            func=_track_lin_vel_xy_dynamic_exp,
+            weight=1.5,
+            params={
+                "command_name": "base_velocity",
+                "sigma_cfg": DYNAMIC_TRACKING_SIGMA_CFG,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
+        self.rewards.track_ang_vel_z_exp = RewTerm(
+            func=_track_ang_vel_z_dynamic_exp,
+            weight=0.75,
+            params={
+                "command_name": "base_velocity",
+                "sigma_cfg": DYNAMIC_TRACKING_SIGMA_CFG,
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        )
 
-        # Stepping incentive — match go2_rl_gym effective value: +1.0 × 0.02 = +0.02.
-        self.rewards.feet_air_time.weight = 0.02
-        self.rewards.feet_air_time.params["sensor_cfg"].body_names = ".*_foot"
+        # Positive air-time shaping encouraged the front-leg sync-hop exploit.
+        # Reference CTS does not rely on this term, so keep it off.
+        self.rewards.feet_air_time = None
 
         # Reference CTS does not use extra survival bonus or feet-slide penalty.
         self.rewards.feet_slide = None
@@ -1216,20 +1446,17 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
         # introducing front/rear asymmetry that could merely shift the problem.
         self.rewards.airborne_torque = RewTerm(
             func=_airborne_torque_penalty,
-            weight=-2e-4,   # torque² per leg ≈ 10–100 Nm² when active; -2e-4 gives ~-0.01/step
+            weight=-2e-4,
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"]),
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["FL_foot", "FR_foot", "RL_foot", "RR_foot"]),
             },
         )
 
-        # Feet regulation helps avoid dragging, but if it is too strong the
-        # student discovers a front-leg-dominant hover gait where the hind legs
-        # simply stay airborne to avoid the penalty. Keep the term, but weaken
-        # it relative to the current flat+stairs mixed-scene objective.
+        # Keep the reference CTS effective weight for terrain-relative dragging.
         self.rewards.feet_regulation = RewTerm(
             func=_feet_regulation_reward,
-            weight=-0.0005,
+            weight=-0.001,
             params={
                 "asset_cfg":          SceneEntityCfg("robot", body_names=".*_foot"),
                 "sensor_cfg":         SceneEntityCfg("height_scanner"),
@@ -1237,18 +1464,14 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
             },
         )
 
-        # Keep hind-leg participation and quiet standing explicitly supervised.
-        self.rewards.front_rear_support_balance = RewTerm(
-            func=_front_rear_support_balance_penalty,
-            weight=-0.01,   # mild asymmetry signal; main gait shaping now via airborne_torque
-            params={
-                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["FL_foot", "FR_foot", "RL_foot", "RR_foot"]),
-                "cmd_threshold": 0.1,
-            },
-        )
+        # Avoid front/rear-specific shaping. It fought valid stair support phases
+        # and was not used by either reference repository.
+        self.rewards.leg_airborne_duration = None
+        self.rewards.front_rear_support_balance = None
+
         self.rewards.stand_still_joint_posture = RewTerm(
             func=_stand_still_joint_penalty,
-            weight=-0.0005,
+            weight=-0.001,
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"]),
                 "cmd_threshold": 0.1,
@@ -1256,16 +1479,21 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
             },
         )
 
-        # Terrain-relative base height.
-        # Use the same effective weight as go2_rl_gym correct_base_height:
-        # -1.0 × 0.02 = -0.02.
         self.rewards.base_height = RewTerm(
-            func=_safe_terrain_base_height_l2,
+            func=_curriculum_scaled_base_height_l2,
             weight=-0.02,
             params={
                 "target_height": 0.38,
                 "sensor_cfg": SceneEntityCfg("height_scanner"),
+                "curriculum_cfg": BASE_HEIGHT_REWARD_CURRICULUM,
             },
+        )
+
+        # go2_rl_gym: dof_power=-2e-5 (effective -4e-7) — penalise joint power τ·q̇.
+        # dof_torques_l2 covers τ² but not the velocity-weighted part; add it.
+        self.rewards.dof_power = RewTerm(
+            func=_joint_power_l1,
+            weight=-4e-7,   # go2_rl_gym: -2e-5 × 0.02
         )
 
 

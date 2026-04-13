@@ -117,6 +117,13 @@ class MySceneCfg(InteractiveSceneCfg):
         debug_vis=False,
     )
 
+    # Optional custom environment USD (hospital, warehouse, etc.).
+    # Inject an AssetBaseCfg here before gym.make() to load it as part of the
+    # initial scene composition — before PhysX runs its first broad-phase reset.
+    # Use a spawn func that deactivates any duplicate ground planes immediately
+    # after loading (see _spawn_hospital_usd in omniverse_sim.py).
+    custom_env: AssetBaseCfg | None = None
+
     # robots
     robot: ArticulationCfg = MISSING
 
@@ -301,6 +308,33 @@ class EventCfg:
         },
     )
 
+    # reset — place robot at init_state position with zero velocity
+    reset_base = EventTerm(
+        func=mdp.reset_root_state_uniform,
+        mode="reset",
+        params={
+            "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)},
+            "velocity_range": {
+                "x": (0.0, 0.0),
+                "y": (0.0, 0.0),
+                "z": (0.0, 0.0),
+                "roll": (0.0, 0.0),
+                "pitch": (0.0, 0.0),
+                "yaw": (0.0, 0.0),
+            },
+        },
+    )
+
+    # reset — joints at exactly their default positions, zero velocity
+    reset_robot_joints = EventTerm(
+        func=mdp.reset_joints_by_scale,
+        mode="reset",
+        params={
+            "position_range": (1.0, 1.0),
+            "velocity_range": (0.0, 0.0),
+        },
+    )
+
 
 @configclass
 class LocomotionVelocityRoughEnvCfg(ManagerBasedRLEnvCfg):
@@ -354,6 +388,14 @@ class UnitreeGo2CustomEnvCfg(LocomotionVelocityRoughEnvCfg):
         super().__post_init__()
 
         self.scene.robot = UNITREE_GO2_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot.spawn.usd_path = (
+            "/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5/Isaac/IsaacLab/Robots/Unitree/Go2/go2.usd"
+        )
+        # UNITREE_GO2_CFG init_state.pos z=0.4 puts feet ~9cm above a flat plane,
+        # causing a hard impact at spawn that corrupts the initial observation with
+        # large joint velocities.  With thigh=0.8-1.0 rad, calf=-1.5 rad the foot
+        # is ~0.31m below the base, so z=0.33 leaves ~2cm clearance — minimal bounce.
+        self.scene.robot.init_state.pos = (0.0, 0.0, 0.33)
         self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/base"
 
         # reduce action scale
@@ -447,6 +489,10 @@ class Go2FullSceneDeployCfg(UnitreeGo2CustomEnvCfg):
     def __post_init__(self):
         super().__post_init__()
         self.actions.joint_pos.scale = 0.25
+        # Deployment: disable episode time-out so robot never teleports back to start
+        self.episode_length_s = 100000.0
+        # Disable orientation termination — let robot keep trying after a stumble
+        self.terminations.bad_orientation = None
 
 
 @configclass
