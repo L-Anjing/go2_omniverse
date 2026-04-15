@@ -262,7 +262,7 @@ BASE_HEIGHT_REWARD_CURRICULUM = {
 }
 
 DYNAMIC_TRACKING_SIGMA_CFG = {
-    "default_sigma": 0.25,
+    "default_sigma": 0.20,  # tightened from 0.25 — reduces cmd/error_vel_xy
     "min_lin_vel": 0.5,
     "max_lin_vel": 1.5,
     "min_ang_vel": 1.0,
@@ -724,14 +724,18 @@ class StairVelocityCommandCfg(mdp.UniformVelocityCommandCfg):
     command_range_curriculum: list[dict[str, object]] = field(
         default_factory=lambda: [
             {
-                "iter": 20000,
+                # Delayed from 20000→40000: the sudden speed expansion at iter 20000
+                # caused terrain_level to jump 2.9→5.5 (noise_std 1.0→2.3) in both
+                # seeds, collapsing training. Give the policy 40k iters at ±0.5 m/s
+                # to consolidate gait quality before extending the command range.
+                "iter": 40000,
                 "lin_vel_x": (-1.0, 1.0),
                 "lin_vel_y": (-1.0, 1.0),
                 "ang_vel_z": (-1.5, 1.5),
                 "heading": (-1.57, 1.57),
             },
             {
-                "iter": 50000,
+                "iter": 80000,  # delayed from 50000 proportionally
                 "lin_vel_x": (-2.0, 2.0),
                 "lin_vel_y": (-1.0, 1.0),
                 "ang_vel_z": (-2.0, 2.0),
@@ -765,7 +769,10 @@ def _terrain_levels_by_command_progress(
         asset.data.root_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2], dim=1
     )
     commanded_distance = torch.norm(command_term.commanded_planar_displacement[env_ids], dim=1)
-    move_up = actual_distance > terrain.cfg.terrain_generator.size[0] / 2
+    # Lowered threshold from /2 (4 m) to /3 (2.67 m): seed_42 terrain stayed at
+    # level 0.9 for the entire run because the robot rarely walked 4 m from spawn.
+    # /3 gives more frequent upgrade opportunities without being too aggressive.
+    move_up = actual_distance > terrain.cfg.terrain_generator.size[0] / 3
     move_down = (commanded_distance > 0.5) & (actual_distance < 0.5 * commanded_distance)
     move_down &= ~move_up
     terrain.update_env_origins(env_ids, move_up, move_down)
@@ -1446,7 +1453,7 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
         # introducing front/rear asymmetry that could merely shift the problem.
         self.rewards.airborne_torque = RewTerm(
             func=_airborne_torque_penalty,
-            weight=-2e-4,
+            weight=-5e-4,   # increased from -2e-4: rear_air_moving was 0.59, target ≤0.52
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"]),
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["FL_foot", "FR_foot", "RL_foot", "RR_foot"]),
