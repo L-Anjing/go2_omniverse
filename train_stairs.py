@@ -768,13 +768,13 @@ def _terrain_levels_by_command_progress(
     actual_distance = torch.norm(
         asset.data.root_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2], dim=1
     )
-    commanded_distance = torch.norm(command_term.commanded_planar_displacement[env_ids], dim=1)
-    # Lowered threshold from /2 (4 m) to /3 (2.67 m): seed_42 terrain stayed at
-    # level 0.9 for the entire run because the robot rarely walked 4 m from spawn.
-    # /3 gives more frequent upgrade opportunities without being too aggressive.
+    # move_up: robot crossed 1/3 of terrain tile from spawn (2.67 m on 8 m tile).
     move_up = actual_distance > terrain.cfg.terrain_generator.size[0] / 3
-    move_down = (commanded_distance > 0.5) & (actual_distance < 0.5 * commanded_distance)
-    move_down &= ~move_up
+    # move_down: robot barely moved at all (<1.5 m) — true locomotion failure.
+    # Previous criterion (actual < 0.5*commanded) wrongly penalised robots that
+    # followed turning commands and returned near spawn despite walking well;
+    # this caused seed_42 terrain_level to decrease throughout training (1.8→1.4).
+    move_down = (actual_distance < 1.5) & ~move_up
     terrain.update_env_origins(env_ids, move_up, move_down)
     return torch.mean(terrain.terrain_levels.float())
 
@@ -1457,6 +1457,22 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_hip_joint", ".*_thigh_joint", ".*_calf_joint"]),
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["FL_foot", "FR_foot", "RL_foot", "RR_foot"]),
+            },
+        )
+
+        # Sustained airborne duration penalty (symmetric, all 4 legs).
+        # airborne_torque covers "tense hover" but a relaxed rear leg (low torque)
+        # still stays airborne.  duration penalty fires every step beyond 0.5 s —
+        # long enough to allow normal stair swing phases (~0.3 s) but not chronic
+        # rear-leg hovering (observed: rear_air_moving rose 0.48→0.57 over 9500 iters
+        # despite -5e-4 airborne_torque, because the leg was relaxed not rigid).
+        self.rewards.leg_airborne_duration = RewTerm(
+            func=_leg_airborne_duration_penalty,
+            weight=-0.3,
+            params={
+                "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["FL_foot", "FR_foot", "RL_foot", "RR_foot"]),
+                "cmd_threshold": 0.1,
+                "duration_threshold": 0.5,
             },
         )
 
