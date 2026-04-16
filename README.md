@@ -2,7 +2,6 @@
 
 Forked from https://github.com/abizovnuralem/go2_omniverse  
 Reference repo https://github.com/wty-yy/go2_rl_gym
-Reference repo https://github.com/ZiwenZhuang/parkour?tab=readme-ov-file
 
 ---
 

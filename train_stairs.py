@@ -1062,38 +1062,47 @@ def _airborne_torque_penalty(
     env,
     asset_cfg: SceneEntityCfg,
     sensor_cfg: SceneEntityCfg,
+    hard_terrain_level: int = 4,
+    hard_terrain_scale: float = 0.15,
 ) -> torch.Tensor:
-    """Penalize joint torques on legs that are currently airborne.
+    """Penalize joint torques on airborne legs, scaled by terrain difficulty.
 
-    A healthy gait naturally minimises torque on swing legs — the leg is
-    unloaded and needs little effort.  Penalising airborne torque encourages
-    the policy to relax any leg it has lifted rather than holding it rigid,
-    which indirectly closes the hover/wheelbarrow local optima:
+    On flat / easy terrain (level < hard_terrain_level): full penalty.
+    On hard terrain (stairs / obstacles, level >= hard_terrain_level): penalty
+    is reduced to hard_terrain_scale × full, allowing the policy to use
+    leg-lifting strategies legitimately needed for obstacle negotiation.
 
-    * Rear legs held up rigid → penalised by this term → policy learns to
-      either plant them or at least keep them relaxed.
-    * Front legs doing the same → equally penalised (symmetric, no front/rear
-      bias that could shift the problem from rear to front).
-
-    Applies to ALL legs symmetrically.  Use in combination with
-    ``feet_regulation`` (penalises dragging) and ``hip_deviation`` (prevents
-    lateral sprawl) for a complete, unbiased gait constraint.
+    This is the terrain-aware ("Direction B") implementation:
+    - Flat ground trot:  full -5e-4 × torque²   →  suppresses idle rear-leg hover
+    - Stair climbing:    only -5e-4×0.15 × torque² →  does not fight valid step-over moves
     """
     asset   = env.scene[asset_cfg.name]
     sensor  = env.scene.sensors[sensor_cfg.name]
 
-    # contact_time > 0 means the foot has been in contact this step
     in_contact = sensor.data.current_contact_time[:, sensor_cfg.body_ids] > 0.0  # (N, 4)
 
-    # joint torques grouped per leg: (N, 4, dof_per_leg)
     dof_per_leg = len(asset_cfg.joint_ids) // 4
-    torques = asset.data.applied_torque[:, asset_cfg.joint_ids]          # (N, 12)
-    torques_per_leg = torques.view(torques.shape[0], 4, dof_per_leg)     # (N, 4, 3)
-
+    torques = asset.data.applied_torque[:, asset_cfg.joint_ids]
+    torques_per_leg = torques.view(torques.shape[0], 4, dof_per_leg)
     torque_sq_per_leg = torques_per_leg.pow(2).sum(dim=-1)               # (N, 4)
-    airborne = ~in_contact                                                # (N, 4)
+    airborne = ~in_contact
 
-    return (torque_sq_per_leg * airborne.float()).sum(dim=1)
+    penalty = (torque_sq_per_leg * airborne.float()).sum(dim=1)          # (N,)
+
+    # Terrain-aware scaling: reduce penalty on hard terrain so stair climbing
+    # leg-lifts are not suppressed.  terrain_levels is (num_envs,) long tensor.
+    try:
+        levels = env.scene.terrain.terrain_levels.float()                # (num_envs,)
+        scale = torch.where(
+            levels >= hard_terrain_level,
+            torch.full_like(levels, hard_terrain_scale),
+            torch.ones_like(levels),
+        )
+        penalty = penalty * scale
+    except AttributeError:
+        pass  # flat-plane deploy env has no terrain_levels; use unscaled penalty
+
+    return torch.nan_to_num(penalty, nan=0.0)
 
 
 def _leg_airborne_duration_penalty(
