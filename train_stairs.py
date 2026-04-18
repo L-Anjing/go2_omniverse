@@ -1496,9 +1496,7 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
             },
         )
 
-        # Avoid front/rear-specific shaping. It fought valid stair support phases
-        # and was not used by either reference repository.
-        self.rewards.leg_airborne_duration = None
+        # front_rear_support_balance fought valid stair support phases; keep disabled.
         self.rewards.front_rear_support_balance = None
 
         self.rewards.stand_still_joint_posture = RewTerm(

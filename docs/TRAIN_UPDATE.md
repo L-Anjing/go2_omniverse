@@ -161,3 +161,8 @@ tensorboard \
 2. 修复 seed_42 地形误降级，改用固定距离判断降级条件（实际位移<1.5m才降级）
 3. 补加腿部悬空时长惩罚（阈值0.5s，权重-0.3），解决后腿悬空率回升问题
 4. `_airborne_torque_penalty`新增地形感知缩放：低难度地形保持全强度，高难度地形（≥level 4）缩放至0.15，允许楼梯越障时合理抬腿
+
+### v2.11
+1. 修复`leg_airborne_duration`惩罚从未生效的代码Bug：v2.7遗留的`None`赋值（1501行）覆盖了v2.10新增的`RewTerm`（1478行），导致TensorBoard无该tag、悬空抑制完全失效
+2. 删除冗余的`None`覆盖，`leg_airborne_duration`（-0.3，阈值0.5s）现已真正启用
+3. TensorBoard分析（3500步）：seed_123地形正常推进至5.8级，seed_42地形卡在~2级但不再下降；rear_air_ratio_moving（0.61/0.57）偏高主因是上述Bug，修复后预期下降
