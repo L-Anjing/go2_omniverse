@@ -723,24 +723,11 @@ class StairVelocityCommandCfg(mdp.UniformVelocityCommandCfg):
     )
     command_range_curriculum: list[dict[str, object]] = field(
         default_factory=lambda: [
-            {
-                # Delayed from 20000→40000: the sudden speed expansion at iter 20000
-                # caused terrain_level to jump 2.9→5.5 (noise_std 1.0→2.3) in both
-                # seeds, collapsing training. Give the policy 40k iters at ±0.5 m/s
-                # to consolidate gait quality before extending the command range.
-                "iter": 40000,
-                "lin_vel_x": (-1.0, 1.0),
-                "lin_vel_y": (-1.0, 1.0),
-                "ang_vel_z": (-1.5, 1.5),
-                "heading": (-1.57, 1.57),
-            },
-            {
-                "iter": 80000,  # delayed from 50000 proportionally
-                "lin_vel_x": (-2.0, 2.0),
-                "lin_vel_y": (-1.0, 1.0),
-                "ang_vel_z": (-2.0, 2.0),
-                "heading": (-1.57, 1.57),
-            },
+            # Three small steps instead of two large jumps to avoid policy collapse.
+            # Each step adds ~0.3 m/s so the policy has time to adapt incrementally.
+            {"iter": 30000, "lin_vel_x": (-0.75, 0.75), "lin_vel_y": (-0.75, 0.75), "ang_vel_z": (-1.5, 1.5), "heading": (-1.57, 1.57)},
+            {"iter": 55000, "lin_vel_x": (-1.0,  1.0),  "lin_vel_y": (-1.0,  1.0),  "ang_vel_z": (-1.5, 1.5), "heading": (-1.57, 1.57)},
+            {"iter": 90000, "lin_vel_x": (-2.0,  2.0),  "lin_vel_y": (-1.0,  1.0),  "ang_vel_z": (-2.0, 2.0), "heading": (-1.57, 1.57)},
         ]
     )
     terrain_max_command_ranges: list[dict[str, tuple[float, float]]] = field(
@@ -768,13 +755,15 @@ def _terrain_levels_by_command_progress(
     actual_distance = torch.norm(
         asset.data.root_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2], dim=1
     )
-    # move_up: robot crossed 1/3 of terrain tile from spawn (2.67 m on 8 m tile).
-    move_up = actual_distance > terrain.cfg.terrain_generator.size[0] / 3
-    # move_down: robot barely moved at all (<1.5 m) — true locomotion failure.
-    # Previous criterion (actual < 0.5*commanded) wrongly penalised robots that
-    # followed turning commands and returned near spawn despite walking well;
-    # this caused seed_42 terrain_level to decrease throughout training (1.8→1.4).
-    move_down = (actual_distance < 1.5) & ~move_up
+    # move_up: aligned to go2_rl_gym (terrain_length / 2 = 4.0 m on 8 m tile).
+    move_up = actual_distance > terrain.cfg.terrain_generator.size[0] / 2
+    # move_down: proportional to commanded velocity × episode time, matching
+    # go2_rl_gym's move_down_by_accumulated_xy_command logic.
+    # If actual displacement < 50% of what was commanded, the robot failed to follow.
+    cmd_vel = torch.norm(command_term.vel_command_b[env_ids, :2], dim=1)
+    episode_length_s = env.max_episode_length * env.step_dt
+    expected_distance = cmd_vel * episode_length_s * 0.5
+    move_down = (actual_distance < expected_distance) & ~move_up
     terrain.update_env_origins(env_ids, move_up, move_down)
     return torch.mean(terrain.terrain_levels.float())
 
@@ -1409,7 +1398,7 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
         # Velocity tracking with go2_rl_gym dynamic sigma.
         self.rewards.track_lin_vel_xy_exp = RewTerm(
             func=_track_lin_vel_xy_dynamic_exp,
-            weight=1.5,
+            weight=1.0,  # aligned to go2_rl_gym (was 1.5)
             params={
                 "command_name": "base_velocity",
                 "sigma_cfg": DYNAMIC_TRACKING_SIGMA_CFG,
@@ -1418,7 +1407,7 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
         )
         self.rewards.track_ang_vel_z_exp = RewTerm(
             func=_track_ang_vel_z_dynamic_exp,
-            weight=0.75,
+            weight=0.5,  # aligned to go2_rl_gym (was 0.75)
             params={
                 "command_name": "base_velocity",
                 "sigma_cfg": DYNAMIC_TRACKING_SIGMA_CFG,

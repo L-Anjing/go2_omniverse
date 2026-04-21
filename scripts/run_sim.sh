@@ -49,9 +49,9 @@ eval "$(conda shell.bash hook)"
 conda activate "${CONDA_ENV_NAME}"
 
 # 4. 运行参数配置
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-unitree_go2_fullscene_cts}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-unitree_go2_fullscene_cts/seed_123}"
 LOAD_RUN="${LOAD_RUN:-.*}"
-CHECKPOINT="${CHECKPOINT:-model_12500.pt}"
+CHECKPOINT="${CHECKPOINT:-model_42000.pt}"
 CMD_SOURCE="${CMD_SOURCE:-keyboard}"
 VIEWER_FOLLOW="${VIEWER_FOLLOW:-off}"
 ACTION_SMOOTHING="${ACTION_SMOOTHING:-0.15}"
