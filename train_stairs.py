@@ -755,15 +755,13 @@ def _terrain_levels_by_command_progress(
     actual_distance = torch.norm(
         asset.data.root_pos_w[env_ids, :2] - env.scene.env_origins[env_ids, :2], dim=1
     )
-    # move_up: aligned to go2_rl_gym (terrain_length / 2 = 4.0 m on 8 m tile).
-    move_up = actual_distance > terrain.cfg.terrain_generator.size[0] / 2
-    # move_down: proportional to commanded velocity × episode time, matching
-    # go2_rl_gym's move_down_by_accumulated_xy_command logic.
-    # If actual displacement < 50% of what was commanded, the robot failed to follow.
-    cmd_vel = torch.norm(command_term.vel_command_b[env_ids, :2], dim=1)
-    episode_length_s = env.max_episode_length * env.step_dt
-    expected_distance = cmd_vel * episode_length_s * 0.5
-    move_down = (actual_distance < expected_distance) & ~move_up
+    # move_up: robot must reach 1/3 of tile (2.67 m on 8 m tile) — proven stable.
+    # go2_rl_gym uses tile/2=4 m but that requires faster/stronger policy earlier.
+    move_up = actual_distance > terrain.cfg.terrain_generator.size[0] / 3
+    # move_down: fixed 1.5 m threshold — only penalise true locomotion failures.
+    # Proportional criterion (cmd_vel × T × 0.5) collapsed terrain to ~0 because
+    # any turning command causes net displacement < threshold even with good walking.
+    move_down = (actual_distance < 1.5) & ~move_up
     terrain.update_env_origins(env_ids, move_up, move_down)
     return torch.mean(terrain.terrain_levels.float())
 
