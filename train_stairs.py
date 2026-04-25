@@ -1396,7 +1396,7 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
         # Velocity tracking with go2_rl_gym dynamic sigma.
         self.rewards.track_lin_vel_xy_exp = RewTerm(
             func=_track_lin_vel_xy_dynamic_exp,
-            weight=1.0,  # aligned to go2_rl_gym (was 1.5)
+            weight=1.5,
             params={
                 "command_name": "base_velocity",
                 "sigma_cfg": DYNAMIC_TRACKING_SIGMA_CFG,
@@ -1405,7 +1405,7 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
         )
         self.rewards.track_ang_vel_z_exp = RewTerm(
             func=_track_ang_vel_z_dynamic_exp,
-            weight=0.5,  # aligned to go2_rl_gym (was 0.75)
+            weight=0.75,
             params={
                 "command_name": "base_velocity",
                 "sigma_cfg": DYNAMIC_TRACKING_SIGMA_CFG,
@@ -1468,7 +1468,7 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
             params={
                 "sensor_cfg": SceneEntityCfg("contact_forces", body_names=["FL_foot", "FR_foot", "RL_foot", "RR_foot"]),
                 "cmd_threshold": 0.1,
-                "duration_threshold": 0.5,
+                "duration_threshold": 0.3,
             },
         )
 
