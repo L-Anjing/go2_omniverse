@@ -19,8 +19,20 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 
 from .actor_critic_cts import ActorCriticCTS
+from .actor_critic_moe_cts import ActorCriticMoECTS
 from .cts_algorithm import CTS
+from .moe_cts_algorithm import MoECTS
 from .rollout_storage_cts import RolloutStorageCTS
+
+POLICY_CLASS_MAP = {
+    "ActorCriticCTS": ActorCriticCTS,
+    "ActorCriticMoECTS": ActorCriticMoECTS,
+}
+
+ALGORITHM_CLASS_MAP = {
+    "CTS": CTS,
+    "MoECTS": MoECTS,
+}
 
 
 class CTSRunner:
@@ -38,13 +50,21 @@ class CTSRunner:
         self.log_dir = log_dir
 
         # ── Config ────────────────────────────────────────────────────────────
-        policy_cfg    = train_cfg["policy"]
-        alg_cfg       = train_cfg["algorithm"]
+        runner_cfg = train_cfg.get("runner", {})
+        policy_cfg = train_cfg["policy"]
+        alg_cfg = train_cfg["algorithm"]
+        policy_class_name = runner_cfg.get("policy_class_name", "ActorCriticCTS")
+        algorithm_class_name = runner_cfg.get("algorithm_class_name", "CTS")
+        policy_class = POLICY_CLASS_MAP[policy_class_name]
+        algorithm_class = ALGORITHM_CLASS_MAP[algorithm_class_name]
         self.history_length       = train_cfg.get("history_length", 5)
-        self.num_steps_per_env    = train_cfg.get("num_steps_per_env", 48)
-        self.save_interval        = train_cfg.get("save_interval", 200)
-        self.max_iterations       = train_cfg.get("max_iterations", 15000)
-        self.experiment_name      = train_cfg.get("experiment_name", "cts_train")
+        self.num_steps_per_env    = runner_cfg.get("num_steps_per_env", train_cfg.get("num_steps_per_env", 48))
+        self.save_interval        = runner_cfg.get("save_interval", train_cfg.get("save_interval", 200))
+        self.max_iterations       = runner_cfg.get("max_iterations", train_cfg.get("max_iterations", 15000))
+        self.experiment_name      = runner_cfg.get("experiment_name", train_cfg.get("experiment_name", "cts_train"))
+        self.policy_class_name    = policy_class_name
+        self.algorithm_class_name = algorithm_class_name
+        self.log_prefix           = f"[{self.algorithm_class_name}]"
 
         # ── Dimensions ────────────────────────────────────────────────────────
         num_obs      = env.num_obs
@@ -53,9 +73,9 @@ class CTSRunner:
         num_envs     = env.num_envs
 
         # ── Model ─────────────────────────────────────────────────────────────
-        self.model = ActorCriticCTS(
-            num_actor_obs=num_obs,
-            num_critic_obs=num_priv_obs,
+        self.model = policy_class(
+            num_obs,
+            num_priv_obs,
             num_actions=num_actions,
             num_envs=num_envs,
             history_length=self.history_length,
@@ -63,7 +83,7 @@ class CTSRunner:
         ).to(device)
 
         # ── Algorithm ─────────────────────────────────────────────────────────
-        self.alg = CTS(
+        self.alg = algorithm_class(
             self.model,
             num_envs=num_envs,
             history_length=self.history_length,
@@ -226,8 +246,9 @@ class CTSRunner:
 
             self.alg.compute_returns(priv_obs, self.history.flatten(1))
             snapshot = self.alg.snapshot_state()
-            mean_value_loss, mean_surrogate_loss, mean_entropy_loss, mean_latent_loss \
-                = self.alg.update()
+            update_metrics = self.alg.update()
+            mean_value_loss, mean_surrogate_loss, mean_entropy_loss, mean_latent_loss = update_metrics[:4]
+            mean_load_balance_loss = update_metrics[4] if len(update_metrics) > 4 else None
             bad_tensors = self.alg.get_nonfinite_state_names()
             had_bad_actor_output = self.model.consume_nonfinite_action_flag()
             if bad_tensors or had_bad_actor_output:
@@ -248,6 +269,7 @@ class CTSRunner:
                 mean_surrogate_loss = 0.0
                 mean_entropy_loss = 0.0
                 mean_latent_loss = 0.0
+                mean_load_balance_loss = 0.0 if mean_load_balance_loss is not None else None
             else:
                 self.last_good_snapshot = self.alg.snapshot_state()
 
@@ -263,6 +285,8 @@ class CTSRunner:
                 self.writer.add_scalar("Loss/surrogate",       mean_surrogate_loss, it)
                 self.writer.add_scalar("Loss/entropy",         mean_entropy_loss,   it)
                 self.writer.add_scalar("Loss/latent",          mean_latent_loss,    it)
+                if mean_load_balance_loss is not None:
+                    self.writer.add_scalar("Loss/load_balance", mean_load_balance_loss, it)
                 self.writer.add_scalar("Loss/learning_rate",   self.alg.learning_rate, it)
                 self.writer.add_scalar("Policy/mean_noise_std", self.model.std.mean().item(), it)
                 fps = int(self.num_steps_per_env * self.env.num_envs /
@@ -299,9 +323,10 @@ class CTSRunner:
                 remain  = (elapsed / max(done, 1)) * max(num_learning_iterations - done, 0)
                 eta     = f"{int(remain // 3600)}h{int((remain % 3600) // 60):02d}m"
                 print(
-                    f"[CTS {done}/{num_learning_iterations}] "
+                    f"{self.log_prefix} [{done}/{num_learning_iterations}] "
                     f"T_rew={t_rew} S_rew={s_rew} T_len={t_len} "
                     f"lat={mean_latent_loss:.4f} "
+                    f"{f'lb={mean_load_balance_loss:.4f} ' if mean_load_balance_loss is not None else ''}"
                     f"steps={self.tot_timesteps/1e6:.2f}M ETA={eta}",
                     flush=True,
                 )
@@ -320,6 +345,11 @@ class CTSRunner:
             "optimizer1_state_dict": self.alg.optimizer1.state_dict(),
             "optimizer2_state_dict": self.alg.optimizer2.state_dict(),
             "iter":                  self.current_learning_iteration,
+            "infos": {
+                "policy_class_name": self.policy_class_name,
+                "algorithm_class_name": self.algorithm_class_name,
+                "experiment_name": self.experiment_name,
+            },
         }, path)
 
     def load(self, path: str, load_optimizer: bool = True) -> None:
@@ -329,7 +359,7 @@ class CTSRunner:
             self.alg.optimizer1.load_state_dict(ckpt["optimizer1_state_dict"])
             self.alg.optimizer2.load_state_dict(ckpt["optimizer2_state_dict"])
         self.current_learning_iteration = ckpt.get("iter", 0)
-        print(f"[CTS] Loaded checkpoint from {path} (iter={self.current_learning_iteration})")
+        print(f"{self.log_prefix} Loaded checkpoint from {path} (iter={self.current_learning_iteration})")
 
     # ── Inference ─────────────────────────────────────────────────────────────
 

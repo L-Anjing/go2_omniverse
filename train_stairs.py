@@ -1,7 +1,7 @@
 # Copyright (c) 2024, RoboVerse community
 # BSD-2-Clause License
 
-"""Train the Go2 locomotion model for stair climbing using CTS.
+"""Train the Go2 locomotion model for stair climbing using CTS / MoE-CTS.
 
 Algorithm: Concurrent Teacher-Student (CTS)  https://arxiv.org/abs/2405.10830
 ---------------------------------------------------------------------------
@@ -33,10 +33,12 @@ Critic obs  (teacher encoder, 263D, clean):
 Usage
 -----
     python train_stairs.py --headless --num_envs 4096 --max_iterations 150000 \
-        --experiment_name unitree_go2_fullscene_cts
+        --architecture cts --experiment_name unitree_go2_fullscene_cts
     python train_stairs.py --headless --num_envs 4096 --max_iterations 150000 \
-        --experiment_name unitree_go2_fullscene_cts \
-        --checkpoint logs/rsl_rl/unitree_go2_fullscene_cts/seed_123/model_14000.pt
+        --architecture moe_cts --experiment_name unitree_go2_fullscene_moe_cts
+    python train_stairs.py --headless --num_envs 4096 --max_iterations 150000 \
+        --architecture moe_cts --experiment_name unitree_go2_fullscene_moe_cts \
+        --checkpoint logs/rsl_rl/unitree_go2_fullscene_moe_cts/seed_123/model_14000.pt
 """
 
 from __future__ import annotations
@@ -46,13 +48,17 @@ from dataclasses import field
 from isaaclab.app import AppLauncher
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="Train Go2 stair climbing with CTS")
+parser = argparse.ArgumentParser(description="Train Go2 stair climbing with CTS or MoE-CTS")
 parser.add_argument("--num_envs",        type=int,   default=4096)
 parser.add_argument("--max_iterations",  type=int,   default=150000)
 parser.add_argument("--checkpoint",      type=str,   default="",
                     help="Resume from a CTS checkpoint (.pt)")
 parser.add_argument("--seed",            type=int,   default=42)
-parser.add_argument("--experiment_name", type=str,   default="unitree_go2_fullscene_cts")
+parser.add_argument("--experiment_name", type=str,   default="",
+                    help="Override experiment name; default follows architecture.")
+parser.add_argument("--architecture",    type=str,   default="cts",
+                    choices=("cts", "moe_cts"),
+                    help="Training architecture. 'moe_cts' matches the reference MoE-CTS structure.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -1514,46 +1520,74 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
         )
 
 
-# ── CTS training configuration ────────────────────────────────────────────────
-def _make_cts_cfg(num_envs: int, max_iterations: int, experiment_name: str) -> dict:
-    """Build the CTS training config dict."""
+# ── CTS / MoE-CTS training configuration ─────────────────────────────────────
+def _default_experiment_name(architecture: str) -> str:
+    if architecture == "moe_cts":
+        return "unitree_go2_fullscene_moe_cts"
+    return "unitree_go2_fullscene_cts"
+
+
+def _make_train_cfg(
+    num_envs: int,
+    max_iterations: int,
+    experiment_name: str,
+    architecture: str,
+) -> dict:
+    """Build a reference-style train config dict."""
+    policy_class_name = "ActorCriticCTS"
+    algorithm_class_name = "CTS"
+    policy_cfg = {
+        "actor_hidden_dims":           [512, 256, 128],
+        "critic_hidden_dims":          [512, 256, 128],
+        "teacher_encoder_hidden_dims": [512, 256],
+        "student_encoder_hidden_dims": [512, 256],
+        "activation":     "elu",
+        "init_noise_std": 1.0,
+        "latent_dim":     32,
+        "norm_type":      "l2norm",
+    }
+    alg_cfg = {
+        "value_loss_coef":              1.0,
+        "use_clipped_value_loss":       True,
+        "clip_param":                   0.2,
+        "entropy_coef":                 0.01,
+        "num_learning_epochs":          5,
+        "num_mini_batches":             4,
+        "learning_rate":                1e-3,
+        "student_encoder_learning_rate": 1e-3,
+        "schedule":        "adaptive",
+        "gamma":           0.99,
+        "lam":             0.95,
+        "desired_kl":      0.01,
+        "max_grad_norm":   1.0,
+        "teacher_env_ratio": 0.75,
+    }
+
+    if architecture == "moe_cts":
+        policy_class_name = "ActorCriticMoECTS"
+        algorithm_class_name = "MoECTS"
+        policy_cfg["student_encoder_hidden_dims"] = [512, 256, 256]
+        policy_cfg["expert_num"] = 8
+        alg_cfg["load_balance_coef"] = 0.01
+
     return {
         # Architecture
         "history_length": 5,
-        "policy": {
-            "actor_hidden_dims":           [512, 256, 128],
-            "critic_hidden_dims":          [512, 256, 128],
-            "teacher_encoder_hidden_dims": [512, 256],
-            "student_encoder_hidden_dims": [512, 256],
-            "activation":     "elu",
-            "init_noise_std": 1.0,
-            "latent_dim":     32,
-            "norm_type":      "l2norm",
+        "policy": policy_cfg,
+        "algorithm": alg_cfg,
+        "runner": {
+            "policy_class_name": policy_class_name,
+            "algorithm_class_name": algorithm_class_name,
+            "num_steps_per_env": 48 if num_envs <= 4096 else 24,
+            "max_iterations": max_iterations,
+            "save_interval": 500,
+            "experiment_name": experiment_name,
         },
-        # PPO + distillation hyperparameters
-        "algorithm": {
-            "value_loss_coef":              1.0,
-            "use_clipped_value_loss":       True,
-            "clip_param":                   0.2,
-            "entropy_coef":                 0.01,
-            "num_learning_epochs":          5,
-            "num_mini_batches":             4,
-            "learning_rate":                1e-3,
-            "student_encoder_learning_rate": 1e-3,
-            "schedule":        "adaptive",
-            "gamma":           0.99,
-            "lam":             0.95,
-            "desired_kl":      0.01,
-            "max_grad_norm":   1.0,
-            "teacher_env_ratio": 0.75,
-        },
-        # Runner settings
-        # go2_rl_gym note: at 4096 envs, num_steps_per_env=48 gives similar
-        # sample efficiency to 8192 envs with 24 steps.
+        # Compatibility fields used elsewhere in this repo.
         "num_steps_per_env": 48 if num_envs <= 4096 else 24,
-        "max_iterations":    max_iterations,
-        "save_interval":     500,
-        "experiment_name":   experiment_name,
+        "max_iterations": max_iterations,
+        "save_interval": 500,
+        "experiment_name": experiment_name,
     }
 
 
@@ -1571,10 +1605,12 @@ def main():
     assert env.num_privileged_obs > 0, \
         "Critic obs group not detected — check Go2StairCriticObsCfg is registered."
 
-    train_cfg = _make_cts_cfg(
+    experiment_name = args_cli.experiment_name or _default_experiment_name(args_cli.architecture)
+    train_cfg = _make_train_cfg(
         args_cli.num_envs,
         args_cli.max_iterations,
-        args_cli.experiment_name,
+        experiment_name,
+        args_cli.architecture,
     )
     log_dir   = os.path.abspath(
         os.path.join(
@@ -1583,6 +1619,12 @@ def main():
             train_cfg["experiment_name"],
             f"seed_{args_cli.seed}",
         )
+    )
+
+    print(
+        f"[INFO] Training architecture={args_cli.architecture} "
+        f"policy={train_cfg['runner']['policy_class_name']} "
+        f"algorithm={train_cfg['runner']['algorithm_class_name']}"
     )
 
     runner = CTSRunner(env, train_cfg, log_dir=log_dir, device="cuda:0")

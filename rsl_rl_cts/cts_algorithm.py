@@ -73,7 +73,7 @@ class CTS:
         self.optimizer1 = optim.Adam(params1, lr=learning_rate)
         # Student encoder distillation optimizer (separate)
         self.optimizer2 = optim.Adam(
-            self.model.student_encoder.parameters(),
+            self._student_encoder_parameters(),
             lr=student_encoder_learning_rate,
         )
 
@@ -96,6 +96,9 @@ class CTS:
             [i for i in range(num_envs) if i % stride == 0], device=device)
         self.teacher_num_envs = len(self.teacher_env_idxs)
         self.student_num_envs = len(self.student_env_idxs)
+
+    def _student_encoder_parameters(self):
+        return self.model.student_encoder.parameters()
 
     # ── Storage ───────────────────────────────────────────────────────────────
 

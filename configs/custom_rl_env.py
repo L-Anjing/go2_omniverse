@@ -55,6 +55,23 @@ from assets.robots.g1.config import G1_CFG
 
 base_command = {}
 
+# Reference go2_rl_gym deploy/train joint order used by the released Go2
+# checkpoints. Deployment observations/actions must follow this exact order.
+GO2_MODEL_JOINT_NAMES = [
+    "FL_hip_joint",
+    "FL_thigh_joint",
+    "FL_calf_joint",
+    "FR_hip_joint",
+    "FR_thigh_joint",
+    "FR_calf_joint",
+    "RL_hip_joint",
+    "RL_thigh_joint",
+    "RL_calf_joint",
+    "RR_hip_joint",
+    "RR_thigh_joint",
+    "RR_calf_joint",
+]
+
 
 def constant_commands(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
     global base_command
@@ -83,12 +100,18 @@ def stair_deploy_commands(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
     return cmds
 
 
-def stair_scaled_base_ang_vel(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
-    return mdp.base_ang_vel(env) * 0.25
+def stair_scaled_base_ang_vel(
+    env: ManagerBasedRLEnvCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    return mdp.base_ang_vel(env, asset_cfg=asset_cfg) * 0.25
 
 
-def stair_scaled_base_lin_vel(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
-    return mdp.base_lin_vel(env) * 2.0
+def stair_scaled_base_lin_vel(
+    env: ManagerBasedRLEnvCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    return mdp.base_lin_vel(env, asset_cfg=asset_cfg) * 2.0
 
 
 def stair_scaled_velocity_commands(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
@@ -97,8 +120,11 @@ def stair_scaled_velocity_commands(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
     return cmds * scale
 
 
-def stair_scaled_joint_vel(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
-    return mdp.joint_vel_rel(env) * 0.05
+def stair_scaled_joint_vel(
+    env: ManagerBasedRLEnvCfg,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    return mdp.joint_vel_rel(env, asset_cfg=asset_cfg) * 0.05
 
 
 def stair_scaled_height_scan(env: ManagerBasedRLEnvCfg) -> torch.Tensor:
@@ -420,7 +446,7 @@ class UnitreeGo2CustomEnvCfg(LocomotionVelocityRoughEnvCfg):
 
 @configclass
 class Go2StairDeployCfg(UnitreeGo2CustomEnvCfg):
-    """Deployment env for the Go2 CTS stair-climbing policy.
+    """Deployment env for the Go2 CTS-family stair-climbing policy.
 
     The CTS student was trained with scaled 45D proprioceptive observations:
       ang_vel*0.25(3) + gravity(3) + cmd*[2,2,0.25](3) +
@@ -429,7 +455,7 @@ class Go2StairDeployCfg(UnitreeGo2CustomEnvCfg):
       - NO height_scan  (student infers terrain from motion history)
 
     This env overrides the policy observation group to produce exactly 45D so
-    that ActorCriticCTS loads without a weight-dimension mismatch.
+    that CTS-family deploy actors load without a weight-dimension mismatch.
     """
 
     @configclass
@@ -441,8 +467,14 @@ class Go2StairDeployCfg(UnitreeGo2CustomEnvCfg):
             base_ang_vel      = ObsTerm(func=stair_scaled_base_ang_vel)
             projected_gravity = ObsTerm(func=mdp.projected_gravity)
             velocity_commands = ObsTerm(func=stair_scaled_velocity_commands)
-            joint_pos         = ObsTerm(func=mdp.joint_pos_rel)
-            joint_vel         = ObsTerm(func=stair_scaled_joint_vel)
+            joint_pos         = ObsTerm(
+                func=mdp.joint_pos_rel,
+                params={"asset_cfg": SceneEntityCfg("robot", joint_names=GO2_MODEL_JOINT_NAMES, preserve_order=True)},
+            )
+            joint_vel         = ObsTerm(
+                func=stair_scaled_joint_vel,
+                params={"asset_cfg": SceneEntityCfg("robot", joint_names=GO2_MODEL_JOINT_NAMES, preserve_order=True)},
+            )
             actions           = ObsTerm(func=mdp.last_action)
 
             def __post_init__(self):
@@ -452,17 +484,46 @@ class Go2StairDeployCfg(UnitreeGo2CustomEnvCfg):
         policy: PolicyCfg = PolicyCfg()
 
     observations: Go2StairDeployObsCfg = Go2StairDeployObsCfg()
+    actions = ActionsCfg(
+        joint_pos=mdp.JointPositionActionCfg(
+            asset_name="robot",
+            joint_names=GO2_MODEL_JOINT_NAMES,
+            preserve_order=True,
+            scale=0.25,
+            use_default_offset=True,
+        )
+    )
 
     def __post_init__(self):
         super().__post_init__()
-        # Match the training action pipeline. UnitreeGo2RoughEnvCfg reduces the
-        # joint position action scale from 0.5 to 0.25; deploy must do the same.
+        # Match the reference go2_rl_gym deploy/training loop as closely as the
+        # Isaac Lab articulation allows for sim-only evaluation.
+        self.scene.robot.init_state.pos = (0.0, 0.0, 0.42)
+        self.scene.robot.spawn.articulation_props.enabled_self_collisions = True
+        self.scene.robot.actuators["base_legs"].stiffness = 20.0
+        self.scene.robot.actuators["base_legs"].damping = 0.5
         self.actions.joint_pos.scale = 0.25
+        # Deploy path: remove Isaac Lab training-side reset/material randomization.
+        self.events.physics_material = None
+        self.events.reset_base.params["pose_range"] = {
+            "x": (0.0, 0.0),
+            "y": (0.0, 0.0),
+            "yaw": (0.0, 0.0),
+        }
+        self.events.reset_base.params["velocity_range"] = {
+            "x": (0.0, 0.0),
+            "y": (0.0, 0.0),
+            "z": (0.0, 0.0),
+            "roll": (0.0, 0.0),
+            "pitch": (0.0, 0.0),
+            "yaw": (0.0, 0.0),
+        }
+        self.episode_length_s = 100000.0
 
 
 @configclass
 class Go2FullSceneDeployCfg(UnitreeGo2CustomEnvCfg):
-    """Deployment env for the full-scene CTS policy.
+    """Deployment env for the full-scene CTS-family policy.
 
     This actor keeps base linear velocity available at deploy time so the
     locomotion controller can handle mixed flat + stair indoor geometry:
@@ -478,8 +539,14 @@ class Go2FullSceneDeployCfg(UnitreeGo2CustomEnvCfg):
             base_ang_vel      = ObsTerm(func=stair_scaled_base_ang_vel)
             projected_gravity = ObsTerm(func=mdp.projected_gravity)
             velocity_commands = ObsTerm(func=stair_scaled_velocity_commands)
-            joint_pos         = ObsTerm(func=mdp.joint_pos_rel)
-            joint_vel         = ObsTerm(func=stair_scaled_joint_vel)
+            joint_pos         = ObsTerm(
+                func=mdp.joint_pos_rel,
+                params={"asset_cfg": SceneEntityCfg("robot", joint_names=GO2_MODEL_JOINT_NAMES, preserve_order=True)},
+            )
+            joint_vel         = ObsTerm(
+                func=stair_scaled_joint_vel,
+                params={"asset_cfg": SceneEntityCfg("robot", joint_names=GO2_MODEL_JOINT_NAMES, preserve_order=True)},
+            )
             actions           = ObsTerm(func=mdp.last_action)
 
             def __post_init__(self):
@@ -489,10 +556,39 @@ class Go2FullSceneDeployCfg(UnitreeGo2CustomEnvCfg):
         policy: PolicyCfg = PolicyCfg()
 
     observations: Go2FullSceneDeployObsCfg = Go2FullSceneDeployObsCfg()
+    actions = ActionsCfg(
+        joint_pos=mdp.JointPositionActionCfg(
+            asset_name="robot",
+            joint_names=GO2_MODEL_JOINT_NAMES,
+            preserve_order=True,
+            scale=0.25,
+            use_default_offset=True,
+        )
+    )
 
     def __post_init__(self):
         super().__post_init__()
+        # Keep the full-scene deploy path on the same Go2 control envelope as
+        # the reference go2_rl_gym checkpoints.
+        self.scene.robot.init_state.pos = (0.0, 0.0, 0.42)
+        self.scene.robot.spawn.articulation_props.enabled_self_collisions = True
+        self.scene.robot.actuators["base_legs"].stiffness = 20.0
+        self.scene.robot.actuators["base_legs"].damping = 0.5
         self.actions.joint_pos.scale = 0.25
+        self.events.physics_material = None
+        self.events.reset_base.params["pose_range"] = {
+            "x": (0.0, 0.0),
+            "y": (0.0, 0.0),
+            "yaw": (0.0, 0.0),
+        }
+        self.events.reset_base.params["velocity_range"] = {
+            "x": (0.0, 0.0),
+            "y": (0.0, 0.0),
+            "z": (0.0, 0.0),
+            "roll": (0.0, 0.0),
+            "pitch": (0.0, 0.0),
+            "yaw": (0.0, 0.0),
+        }
         # Deployment: disable episode time-out so robot never teleports back to start
         self.episode_length_s = 100000.0
         # Disable orientation termination — let robot keep trying after a stumble

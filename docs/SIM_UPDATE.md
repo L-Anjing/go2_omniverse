@@ -4,12 +4,14 @@
 
 ```bash
 ./scripts/run_sim.sh
+DEPLOY_ARCHITECTURE=moe_cts ./scripts/run_sim.sh
 
 # 场景可切：hospital / warehouse / office
 # 控制源可切：--cmd_source keyboard | ros2
 ```
 
 ## 版本记录（从上到下递增）
+
 
 ### v0.1
 1. 基础仿真框架搭建，集成 IsaacLab env 与 ROS2 接口。
@@ -98,3 +100,13 @@
 ### v0.21
 1. CTS 训练侧数值稳定性加固：reward 改用 `nan_to_num` + `clamp` 双步裁剪；actor 输出非有限时自动回滚到上一个 good snapshot；`_fwd()` 输入全部净化；critic 输出套 tanh 有界；GAE 全路径 `_safe()`。
 2. 兼容 IsaacLab `extras["log"]` 与旧版 `extras["episode"]` 两种 key；episode 指标即时转 CPU 防 OOM。
+
+### v0.22
+1. 部署侧新增 `MoE-CTS` checkpoint 兼容，支持参考仓库 `go2_moe_cts` 权重直接推理。
+2. checkpoint 维度推断扩展为同时识别普通 `CTS` 与 `student_moe_encoder` 结构，并自动恢复 `expert_num`、history 长度和隐层配置。
+3. `load_cts_policy()` 改为按 checkpoint 类型自动选择 `ActorCriticCTS` 或 `ActorCriticMoECTS`，保持 `45D/48D` deploy env 自动匹配逻辑不变。
+
+### v0.23
+1. `scripts/run_sim.sh` 新增显式部署开关 `DEPLOY_ARCHITECTURE={cts,moe_cts}`，默认实验目录切换不再只靠 `EXPERIMENT_NAME` 间接表达。
+2. `core/omniverse_sim.py` 新增 `--deploy_architecture`，直连 Go2 默认部署实验映射；若请求架构与实际 checkpoint 结构不一致，会打印告警并按真实 checkpoint 加载。
+3. 清理部署入口与 deploy env 注释，将“仅 CTS”表述统一为 `CTS-family` / `CTS / MoE-CTS`。

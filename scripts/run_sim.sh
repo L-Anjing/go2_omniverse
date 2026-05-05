@@ -49,17 +49,24 @@ eval "$(conda shell.bash hook)"
 conda activate "${CONDA_ENV_NAME}"
 
 # 4. 运行参数配置
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-unitree_go2_fullscene_cts/seed_123}"
+DEPLOY_ARCHITECTURE="${DEPLOY_ARCHITECTURE:-moe_cts}"
+if [ -z "${EXPERIMENT_NAME:-}" ]; then
+    if [ "$DEPLOY_ARCHITECTURE" = "moe_cts" ]; then
+        EXPERIMENT_NAME="unitree_go2_fullscene_moe_cts"
+    else
+        EXPERIMENT_NAME="unitree_go2_fullscene_cts"
+    fi
+fi
 LOAD_RUN="${LOAD_RUN:-.*}"
-CHECKPOINT="${CHECKPOINT:-model_42000.pt}"
+CHECKPOINT="${CHECKPOINT:-model_164000.pt}"
 CMD_SOURCE="${CMD_SOURCE:-keyboard}"
 VIEWER_FOLLOW="${VIEWER_FOLLOW:-off}"
-ACTION_SMOOTHING="${ACTION_SMOOTHING:-0.15}"
-ZERO_CMD_STANCE_BLEND="${ZERO_CMD_STANCE_BLEND:-0.35}"
-ZERO_CMD_THRESHOLD="${ZERO_CMD_THRESHOLD:-0.05}"
 
 # 5. 启动主程序
 echo "[INFO] Launching main simulation..."
+echo "[INFO] Deploy architecture: ${DEPLOY_ARCHITECTURE}"
+echo "[INFO] Experiment: ${EXPERIMENT_NAME}"
+echo "[INFO] Checkpoint pattern: ${CHECKPOINT}"
 cd "${REPO_ROOT}"
 
 python main.py \
@@ -69,10 +76,8 @@ python main.py \
     --enable_cameras \
     --custom_env hospital \
     --cmd_source "${CMD_SOURCE}" \
+    --deploy_architecture "${DEPLOY_ARCHITECTURE}" \
     --viewer_follow "${VIEWER_FOLLOW}" \
-    --action_smoothing "${ACTION_SMOOTHING}" \
-    --zero_cmd_stance_blend "${ZERO_CMD_STANCE_BLEND}" \
-    --zero_cmd_threshold "${ZERO_CMD_THRESHOLD}" \
     --experiment_name "${EXPERIMENT_NAME}" \
     --load_run "${LOAD_RUN}" \
     --checkpoint "${CHECKPOINT}" \

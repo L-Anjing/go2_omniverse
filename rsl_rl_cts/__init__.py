@@ -7,7 +7,9 @@
 
 from .cts_runner import CTSRunner
 from .actor_critic_cts import ActorCriticCTS
+from .actor_critic_moe_cts import ActorCriticMoECTS
 from .cts_algorithm import CTS
+from .moe_cts_algorithm import MoECTS
 from .rollout_storage_cts import RolloutStorageCTS
 
-__all__ = ["CTSRunner", "ActorCriticCTS", "CTS", "RolloutStorageCTS"]
+__all__ = ["CTSRunner", "ActorCriticCTS", "ActorCriticMoECTS", "CTS", "MoECTS", "RolloutStorageCTS"]

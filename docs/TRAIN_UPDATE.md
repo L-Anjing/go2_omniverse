@@ -12,9 +12,15 @@ tail -f logs/train_stairs_logs/train_gpu1.log
 tensorboard \
   --logdir /media/user/data1/carl/workspace/go2_omniverse/logs/rsl_rl/unitree_go2_fullscene_cts \
   --port 6006 --host 127.0.0.1
+
+# MoE-CTS 训练可视化
+tensorboard \
+  --logdir /media/user/data1/carl/workspace/go2_omniverse/logs/rsl_rl/unitree_go2_fullscene_moe_cts \
+  --port 6006 --host 127.0.0.1
 ```
 
 ## 版本记录（从上到下，版本号递增）
+
 
 ### v0.1
 1. 搭建楼梯任务基础配置，基于PPO算法完成训练链路跑通。
@@ -171,3 +177,9 @@ tensorboard \
 1. 指令课程改为三档渐进扩展（±0.5→±0.75@30k→±1.0@55k→±2.0@90k），消除两次大幅扩档导致的策略崩溃
 2. 地形课程`move_down`误改为比例阈值导致地形归零、轮椅步态——已回退固定1.5m阈值；速度跟踪权重对齐参考仓库（1.5→1.0）后entropy骤降至13.5、seed_42地形再次卡死，确认IsaacLab框架下1.0/0.5不适用——已恢复1.5/0.75
 3. `leg_airborne_duration`阈值从0.5s收紧至0.3s（trot摆动约0.25s，0.5s门槛几乎不触发），加强后腿慢性悬空抑制
+
+### v3.4
+1. 训练链路新增参考仓库同构的 `MoE-CTS` 架构支持，保留原有 `CTS` 兼容路径。
+2. `train_stairs.py` 新增 `--architecture {cts,moe_cts}`，`scripts/run_train_stairs.sh` 支持 `ARCHITECTURE=moe_cts`。
+3. `CTSRunner` 改为按 `policy_class_name` / `algorithm_class_name` 实例化模型与算法，并记录 `load_balance` 损失。
+4. `MoECTS` 训练算法接入 `student_moe_encoder` 与负载均衡正则，checkpoint 保存格式补齐 `infos` 元数据，便于与参考仓库权重结构对齐。

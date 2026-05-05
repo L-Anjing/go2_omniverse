@@ -9,7 +9,7 @@ Reference repo https://github.com/wty-yy/go2_rl_gym
 
 本仓库主要实现以下功能：
 - 在 Isaac Lab / Omniverse 中进行 Go2、G1 机器人的仿真与推理
-- 训练并部署 Go2 机器人的 CTS 楼梯 / full-scene 运动控制策略
+- 训练并部署 Go2 机器人的 CTS / MoE-CTS 楼梯 / full-scene 运动控制策略
 
 ## 已实现功能
 
@@ -18,7 +18,7 @@ Reference repo https://github.com/wty-yy/go2_rl_gym
 - ROS2 传感器数据与机器人状态发布
 - RTX LiDAR（适配 Point_LIO）、IMU、相机、语义分割数据输出
 - `hospital` / `office` / `warehouse` 场景加载
-- Go2 CTS 模型训练、日志保存与 checkpoint 部署
+- Go2 CTS / MoE-CTS 模型训练、日志保存与 checkpoint 部署
 
 ## 主要入口文件
 
@@ -26,7 +26,7 @@ Reference repo https://github.com/wty-yy/go2_rl_gym
 - 仿真主逻辑：`core/omniverse_sim.py`
 - ROS2 发布：`core/ros2.py`
 - 环境配置：`configs/custom_rl_env.py`
-- Go2 CTS 训练：`train_stairs.py`
+- Go2 CTS / MoE-CTS 训练：`train_stairs.py`
 - 常用仿真脚本：`scripts/run_sim.sh`
 - 常用训练脚本：`scripts/run_train_stairs.sh`
 
@@ -39,12 +39,23 @@ cd go2_omniverse
 ./scripts/run_sim.sh
 ```
 
+切到 `MoE-CTS` 部署：
+```bash
+DEPLOY_ARCHITECTURE=moe_cts ./scripts/run_sim.sh
+```
+
 默认加载配置：
+- `DEPLOY_ARCHITECTURE=cts`
 - `EXPERIMENT_NAME=unitree_go2_fullscene_cts/seed_*`
 - `CHECKPOINT=model_*.pt`
 - `CMD_SOURCE=keyboard`
 
 可自行修改参数，支持 ROS2 话题控制。
+如需切到 `MoE-CTS` 部署，优先使用显式开关：
+```bash
+DEPLOY_ARCHITECTURE=moe_cts ./scripts/run_sim.sh
+```
+如需自定义，也可继续手动覆盖 `EXPERIMENT_NAME` 与 `CHECKPOINT`。
 
 ### 2. 启动双卡训练
 
@@ -55,6 +66,21 @@ cd go2_omniverse
 自定义环境数量与训练轮数：
 ```bash
 ./scripts/run_train_stairs.sh 4096 150000
+```
+
+训练参考仓库同构的 `MoE-CTS`：
+```bash
+ARCHITECTURE=moe_cts ./scripts/run_train_stairs.sh
+```
+
+也可以直接调用：
+```bash
+python train_stairs.py --architecture moe_cts --headless
+```
+
+如需显式训练普通 `CTS`：
+```bash
+python train_stairs.py --architecture cts --headless
 ```
 
 ## 输出路径
@@ -69,13 +95,14 @@ cd go2_omniverse
 
 ### Checkpoint 默认目录
 - `logs/rsl_rl/unitree_go2_fullscene_cts/seed_*/`
+- `logs/rsl_rl/unitree_go2_fullscene_moe_cts/seed_*/`
 
 ## 常用命令
 
 ### 实时查看训练日志
 ```bash
-tail -f logs/train_stairs_logs/train_gpu0.log | grep -E '\[CTS|ERROR|Traceback'
-tail -f logs/train_stairs_logs/train_gpu1.log | grep -E '\[CTS|ERROR|Traceback'
+tail -f logs/train_stairs_logs/train_gpu0.log | grep -E '\[(CTS|MoECTS)|ERROR|Traceback'
+tail -f logs/train_stairs_logs/train_gpu1.log | grep -E '\[(CTS|MoECTS)|ERROR|Traceback'
 ```
 
 ### 停止双卡训练
@@ -98,7 +125,7 @@ kill -9 -$(cat logs/train_stairs_logs/train_gpu0.pid) -$(cat logs/train_stairs_l
 
 ## 补充说明
 
-- Go2 的 CTS 部署会根据 checkpoint 自动匹配 `45D` 或 `48D` student observation
+- Go2 的 CTS / MoE-CTS 部署会根据 checkpoint 自动匹配 `45D` 或 `48D` student observation
 - `hospital`、`office`、`warehouse` 场景资产位于 `assets/env/`
 - 详细训练迭代记录见 `docs/TRAIN_UPDATE.md`
 - 详细仿真改动记录见 `docs/SIM_UPDATE.md`

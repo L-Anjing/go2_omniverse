@@ -21,6 +21,11 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+"""Simulation entrypoint.
+
+CLI parsing lives in `core.omniverse_sim`, including the explicit
+`--deploy_architecture {cts,moe_cts}` switch used by `scripts/run_sim.sh`.
+"""
 
 from core.omniverse_sim import run_sim
 
