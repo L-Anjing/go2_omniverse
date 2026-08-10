@@ -1,0 +1,2 @@
+episode,stairs,success,reason,initial_distance_m,spawn_error_m,final_distance_m,path_length_m,spl,steps,spawn_x,spawn_y,spawn_z,goal_x,goal_y,goal_z,pct_anchor
+0,1,0,base_contact,4.144,0.0,1.821,0.0,0.0,1,7.872,12.698,0.801,7.881,10.877,4.523,

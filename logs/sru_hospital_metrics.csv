@@ -1,0 +1,2 @@
+episode,stairs,success,reason,initial_distance_m,spawn_error_m,final_distance_m,path_length_m,spl,steps
+0,0,0,timeout,13.447,0.0,11.67,1.964,0.0,10

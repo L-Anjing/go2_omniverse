@@ -16,7 +16,7 @@ Reference repo https://github.com/wty-yy/go2_rl_gym
 - Go2 / G1 仿真运行与 checkpoint 模型推理
 - 键盘控制与 ROS2 `cmd_vel` 控制
 - ROS2 传感器数据与机器人状态发布
-- RTX LiDAR（适配 Point_LIO）、IMU、相机、语义分割数据输出
+- RTX LiDAR（适配 Point_LIO）、IMU、相机（单目 / 双目 RGBD）、语义分割数据输出
 - `hospital` / `office` / `warehouse` 场景加载
 - Go2 CTS / MoE-CTS 模型训练、日志保存与 checkpoint 部署
 
@@ -48,14 +48,39 @@ DEPLOY_ARCHITECTURE=moe_cts ./scripts/run_sim.sh
 - `DEPLOY_ARCHITECTURE=cts`
 - `EXPERIMENT_NAME=unitree_go2_fullscene_cts/seed_*`
 - `CHECKPOINT=model_*.pt`
-- `CMD_SOURCE=keyboard`
+- `CMD_SOURCE=ros2`
+- `CAMERA_MODE=single`
+- `ENABLE_DEPTH=false`
 
-可自行修改参数，支持 ROS2 话题控制。
+启动键盘控制：
+```
+ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/robot0/cmd_vel
+```
+
+可自行 CMD 修改参数，支持 keyboard 控制。
 如需切到 `MoE-CTS` 部署，优先使用显式开关：
 ```bash
 DEPLOY_ARCHITECTURE=moe_cts ./scripts/run_sim.sh
 ```
 如需自定义，也可继续手动覆盖 `EXPERIMENT_NAME` 与 `CHECKPOINT`。
+
+#### 双目 RGBD 相机
+
+切换到双目立体相机 (`go2_double_camera.usd`) 并发布深度图：
+```bash
+CAMERA_MODE=double ENABLE_DEPTH=true ./scripts/run_sim.sh
+```
+
+仅双目 RGB 不发布深度（默认）：
+```bash
+CAMERA_MODE=double ./scripts/run_sim.sh
+```
+
+单目 RGBD：
+```bash
+ENABLE_DEPTH=true ./scripts/run_sim.sh
+```
+
 
 ### 2. 启动双卡训练
 
@@ -120,8 +145,19 @@ kill -9 -$(cat logs/train_stairs_logs/train_gpu0.pid) -$(cat logs/train_stairs_l
 - `robot0/imu`
 - `robot0/point_cloud2_L1`
 - `robot0/front_cam/rgb`
+- `robot0/front_cam/depth`                     (if `ENABLE_DEPTH=true`)
 - `robot0/front_cam/camera_info`
 - `robot0/front_cam/semantic_segmentation`
+
+### 双目相机输出 (CAMERA_MODE=double)
+- `robot0/front_cam_left/rgb`
+- `robot0/front_cam_right/rgb`
+- `robot0/front_cam_left/depth`                (if `ENABLE_DEPTH=true`)
+- `robot0/front_cam_right/depth`               (if `ENABLE_DEPTH=true`)
+- `robot0/front_cam_left/camera_info`
+- `robot0/front_cam_right/camera_info`
+- `robot0/front_cam_left/semantic_segmentation`
+- `robot0/front_cam_right/semantic_segmentation`
 
 ## 补充说明
 

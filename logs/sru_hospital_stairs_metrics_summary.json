@@ -1,0 +1,10 @@
+{
+  "episodes": 1,
+  "successes": 0,
+  "success_rate": 0.0,
+  "mean_spl": 0.0,
+  "mean_initial_distance_m": 4.144,
+  "mean_final_distance_m": 1.821,
+  "mean_path_length_m": 0.0,
+  "mean_abs_elevation_change_m": 3.722
+}

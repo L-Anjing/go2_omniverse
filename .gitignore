@@ -11,4 +11,5 @@ env
 .codex
 .claude
 .codex
+.codewhale
 rsl_rl_cts/__pycache__

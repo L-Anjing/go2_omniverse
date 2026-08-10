@@ -31,6 +31,7 @@ from geometry_msgs.msg import TransformStamped, Twist, Vector3, Quaternion
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 from go2_interfaces.msg import Go2State
 from std_msgs.msg import Header
+from builtin_interfaces.msg import Time
 
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, PointField, Imu
@@ -130,43 +131,67 @@ def attach_usd_to_sensor(sensor_path: str, usd_path: str, visible=True):
         prim = stage.GetPrimAtPath(path)
         prim.GetAttribute("visibility").Set("inherited")
 
-def add_camera(num_envs, robot_type):
-    for i in range(num_envs):
-        cameraCfg = CameraCfg(
-            prim_path=f"/World/envs/env_{i}/Robot/base/front_cam",
-            update_period=0.1,
-            # Reduced from 480 × 640 to match OmniGraph render product (640 × 360).
-            # 1280×720 @ ~5 Hz is too heavy for RTX; 640×360 cuts pixel count by 75%.
-            height=360,
-            width=640,
-            # Only "rgb" here. Isaac Sim 4.5 has a bug: adding "semantic_segmentation"
-            # to data_types forces the robot USD from instanceable → non-instanceable,
-            # which deletes collision prims mid-simulation and invalidates the PhysX
-            # tensors simulationView (causes hang/crash).
-            # Semantic segmentation is published via OmniGraph (ROS2CameraHelper with
-            # type="semantic_segmentation"), which reads directly from the RTX render
-            # pipeline and is completely independent of this IsaacLab data_types list.
-            data_types=["rgb"],
-            spawn=sim_utils.PinholeCameraCfg(
-                focal_length=24.0,
-                focus_distance=400.0,
-                horizontal_aperture=20.955,
-                clipping_range=(0.1, 1.0e5),
-            ),
-            offset=CameraCfg.OffsetCfg(
-                pos=(0.32487, -0.00095, 0.05362),
-                rot=(0.5, -0.5, 0.5, -0.5),
-                convention="ros",
-            ),
-        )
+def add_camera(num_envs, robot_type, camera_mode="single"):
+    """Create IsaacLab Camera sensors for each environment.
 
-        if robot_type == "g1":
-            cameraCfg.prim_path = f"/World/envs/env_{i}/Robot/head_link/front_cam"
-            cameraCfg.offset = CameraCfg.OffsetCfg(
-                pos=(0.0, 0.0, 0.0), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"
+    When *camera_mode* is ``"double"``, two cameras are created per env:
+    ``front_cam_left`` and ``front_cam_right``.  Their positions are offset
+    ±5 cm laterally from the default center position to match the stereo
+    camera layout in ``go2_double_camera.usd``.
+    """
+    # Default position / rotation for Go2 front_cam (center).
+    # Indoor world-model collection does not benefit from kilometre-scale
+    # background values. A 30 m far plane also makes no-hit depth explicit.
+    DEFAULT_POS = (0.32487, -0.00095, 0.05362)
+    DEFAULT_ROT = (0.5, -0.5, 0.5, -0.5)  # w,x,y,z ROS convention
+
+    if camera_mode == "double":
+        cam_configs = [
+            ("front_cam_left",  (DEFAULT_POS[0], -0.05, DEFAULT_POS[2]), DEFAULT_ROT),
+            ("front_cam_right", (DEFAULT_POS[0],  0.05, DEFAULT_POS[2]), DEFAULT_ROT),
+        ]
+    else:
+        cam_configs = [
+            ("front_cam", DEFAULT_POS, DEFAULT_ROT),
+        ]
+
+    for i in range(num_envs):
+        for cam_name, pos, rot in cam_configs:
+            cameraCfg = CameraCfg(
+                prim_path=f"/World/envs/env_{i}/Robot/base/{cam_name}",
+                update_period=0.1,
+                # Reduced from 480 × 640 to match OmniGraph render product (640 × 360).
+                # 1280×720 @ ~5 Hz is too heavy for RTX; 640×360 cuts pixel count by 75%.
+                height=360,
+                width=640,
+                # Only "rgb" here. Isaac Sim 4.5 has a bug: adding "semantic_segmentation"
+                # to data_types forces the robot USD from instanceable → non-instanceable,
+                # which deletes collision prims mid-simulation and invalidates the PhysX
+                # tensors simulationView (causes hang/crash).
+                # Semantic segmentation is published via OmniGraph (ROS2CameraHelper with
+                # type="semantic_segmentation"), which reads directly from the RTX render
+                # pipeline and is completely independent of this IsaacLab data_types list.
+                data_types=["rgb"],
+                spawn=sim_utils.PinholeCameraCfg(
+                    focal_length=24.0,
+                    focus_distance=400.0,
+                    horizontal_aperture=20.955,
+                    clipping_range=(0.1, 30.0),
+                ),
+                offset=CameraCfg.OffsetCfg(
+                    pos=pos,
+                    rot=rot,
+                    convention="ros",
+                ),
             )
 
-        Camera(cameraCfg)
+            if robot_type == "g1":
+                cameraCfg.prim_path = f"/World/envs/env_{i}/Robot/head_link/{cam_name}"
+                cameraCfg.offset = CameraCfg.OffsetCfg(
+                    pos=(0.0, 0.0, 0.0), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"
+                )
+
+            Camera(cameraCfg)
 
 def add_copter_camera():
 
@@ -189,10 +214,23 @@ def add_copter_camera():
 
     Camera(cameraCfg)
 
-def pub_robo_data_ros2(robot_type, num_envs, base_node, env, annotator_lst, base_commands=None):
+def pub_robo_data_ros2(
+    robot_type,
+    num_envs,
+    base_node,
+    env,
+    annotator_lst,
+    base_commands=None,
+    timestamp_seconds=None,
+):
     # Single timestamp for the entire frame so TF and all sensor messages
     # are consistent — prevents RViz2 from extrapolating transforms.
-    stamp = base_node.get_clock().now().to_msg()
+    if timestamp_seconds is None:
+        stamp = base_node.get_clock().now().to_msg()
+    else:
+        stamp = Time()
+        stamp.sec = int(timestamp_seconds)
+        stamp.nanosec = int((float(timestamp_seconds) - stamp.sec) * 1.0e9)
 
     for i in range(num_envs):
         base_node.publish_joints(

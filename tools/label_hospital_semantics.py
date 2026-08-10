@@ -52,13 +52,15 @@ except ImportError:
 # Rules are tested in order; first match wins.
 LABEL_RULES: list[tuple[re.Pattern, str]] = [
     # ── Structural ────────────────────────────────────────────────────────
+    # Railings live below stair parents in the Hospital hierarchy, so this
+    # obstacle rule must precede the broader stair rule.
+    (re.compile(r"railing|handrail|rail"), "railing"),
     (re.compile(r"stair|step|ramp"),       "stairs"),
     (re.compile(r"elevator|lift"),         "elevator"),
     (re.compile(r"floor|ground|slab"),     "floor"),
     (re.compile(r"ceiling|ceil|roof"),     "ceiling"),
     (re.compile(r"wall"),                  "wall"),
     (re.compile(r"column|pillar"),         "column"),
-    (re.compile(r"railing|handrail|rail"), "railing"),
     (re.compile(r"door"),                  "door"),
     (re.compile(r"window"),                "window"),
     (re.compile(r"corridor|hallway"),      "corridor"),

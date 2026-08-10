@@ -250,7 +250,7 @@ class CommandsCfg:
         rel_heading_envs=1.0,
         heading_command=True,
         heading_control_stiffness=0.5,
-        debug_vis=True,
+        debug_vis=False,
         ranges=mdp.UniformVelocityCommandCfg.Ranges(
             lin_vel_x=(0.0, 0.0),
             lin_vel_y=(0.0, 0.0),
@@ -519,6 +519,10 @@ class Go2StairDeployCfg(UnitreeGo2CustomEnvCfg):
             "yaw": (0.0, 0.0),
         }
         self.episode_length_s = 100000.0
+        # Collection/deployment episodes are reset explicitly through ROS2.
+        # Training-time contact termination otherwise teleports the robot in
+        # env.step() without notifying the dataset recorder.
+        self.terminations.base_contact = None
 
 
 @configclass
@@ -591,6 +595,7 @@ class Go2FullSceneDeployCfg(UnitreeGo2CustomEnvCfg):
         }
         # Deployment: disable episode time-out so robot never teleports back to start
         self.episode_length_s = 100000.0
+        self.terminations.base_contact = None
         # Disable orientation termination — let robot keep trying after a stumble
         self.terminations.bad_orientation = None
 
