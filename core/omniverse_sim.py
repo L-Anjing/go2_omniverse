@@ -37,8 +37,13 @@ from isaaclab.app import AppLauncher
 
 
 from core import cli_args
-from core.semantic_labels import infer_semantic_class
+from core.semantic_labels import (
+    canonical_semantic_class,
+    infer_semantic_class,
+    is_traversal_surface_class,
+)
 from core.spatial_geometry import (
+    find_traversal_entry_spawn_points,
     has_body_clearance_from_obstacles,
     is_walkable_triangle,
 )
@@ -227,6 +232,30 @@ _EPISODE_RESET_LOCK = threading.Lock()
 _EPISODE_RESET_ERROR = ""
 
 
+def _direct_semantic_class(prim) -> str:
+    for attribute in prim.GetAttributes():
+        if "semanticData" not in attribute.GetName():
+            continue
+        value = attribute.Get()
+        if value:
+            return canonical_semantic_class(str(value))
+    return "misc"
+
+
+def _spatial_semantic_class(prim, profile_hint: str = "") -> str:
+    """Resolve geometry leaf-first, then fall back to authored ancestor labels."""
+    inferred = infer_semantic_class(str(prim.GetPath()), profile_hint)
+    if inferred != "misc":
+        return inferred
+    current = prim
+    while current and current.IsValid() and not current.IsPseudoRoot():
+        authored = _direct_semantic_class(current)
+        if authored != "misc":
+            return authored
+        current = current.GetParent()
+    return "misc"
+
+
 def _spatial_float_env(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, default))
@@ -268,8 +297,8 @@ def _record_custom_scene_bounds(stage, prim_path: str) -> None:
         lowered = path.lower()
         mesh_range = cache.ComputeWorldBound(descendant).ComputeAlignedRange()
         mesh_min, mesh_max = mesh_range.GetMin(), mesh_range.GetMax()
-        semantic_class = infer_semantic_class(
-            path, os.environ.get("DATA_COLLECTION_PROFILE", args_cli.custom_env)
+        semantic_class = _spatial_semantic_class(
+            descendant, os.environ.get("DATA_COLLECTION_PROFILE", args_cli.custom_env)
         )
         if semantic_class not in {"floor", "ramp", "stairs", "pit"}:
             obstacle = tuple(
@@ -290,7 +319,7 @@ def _record_custom_scene_bounds(stage, prim_path: str) -> None:
                 and obstacle[5] - obstacle[4] > 0.03
             ):
                 obstacle_bounds.append(obstacle)
-        if not ("floor" in lowered or "ground" in lowered):
+        if semantic_class != "floor":
             continue
         if any(name in lowered for name in ignored_names):
             continue
@@ -310,18 +339,14 @@ def _record_custom_scene_bounds(stage, prim_path: str) -> None:
             continue
         floor_bounds.append(values)
 
-    traversal_names = ("stair", "ramp", "slope", "platform")
     for descendant in Usd.PrimRange(prim, Usd.TraverseInstanceProxies()):
         if not descendant.IsActive() or not descendant.IsA(UsdGeom.Mesh):
             continue
-        descendant_path = str(descendant.GetPath())
-        if not any(name in descendant_path.lower() for name in traversal_names):
-            continue
-        semantic_class = infer_semantic_class(
-            descendant_path,
+        semantic_class = _spatial_semantic_class(
+            descendant,
             os.environ.get("DATA_COLLECTION_PROFILE", args_cli.custom_env),
         )
-        if semantic_class not in {"floor", "ramp", "stairs"}:
+        if not is_traversal_surface_class(semantic_class):
             continue
         mesh = UsdGeom.Mesh(descendant)
         orientation_sign = (
@@ -494,12 +519,16 @@ def _write_spatial_map(
     path = Path(path_value)
     path.parent.mkdir(parents=True, exist_ok=True)
     document = {
+        "spatial_semantics_version": 3,
         "profile": os.environ.get("DATA_COLLECTION_PROFILE", args_cli.custom_env),
         "scene_prim_path": _CUSTOM_SCENE_PRIM_PATH,
         "xy_bounds": list(_CUSTOM_SCENE_BOUNDS),
         "valid_points": [list(point) for point in points],
         "traversal_points": [list(point) for point in traversal_points],
         "grid_resolution": grid_resolution,
+        "traversal_grid_resolution": _spatial_float_env(
+            "SPATIAL_TRAVERSAL_GRID_RESOLUTION", 0.30
+        ),
         "elevation_range": (
             [
                 min(point[2] for point in points + traversal_points),
@@ -548,6 +577,9 @@ def _build_traversal_points() -> list[tuple[float, float, float]]:
     resolution = max(_spatial_float_env("SPATIAL_TRAVERSAL_GRID_RESOLUTION", 0.30), 0.15)
     z_min = _spatial_float_env("SPATIAL_FLOOR_Z_MIN", -1.0)
     z_max = _spatial_float_env("SPATIAL_FLOOR_Z_MAX", 4.5)
+    traversal_clearance = _spatial_float_env(
+        "SPATIAL_TRAVERSAL_CLEARANCE", 0.32
+    )
     points: dict[tuple[int, int, int], tuple[float, float, float]] = {}
     for triangle in _CUSTOM_TRAVERSAL_TRIANGLES:
         x_min = min(vertex[0] for vertex in triangle)
@@ -564,7 +596,9 @@ def _build_traversal_points() -> list[tuple[float, float, float]]:
                     point is not None
                     and z_min <= z <= z_max
                     and has_body_clearance_from_obstacles(
-                        point, _CUSTOM_OBSTACLE_BOUNDS
+                        point,
+                        _CUSTOM_OBSTACLE_BOUNDS,
+                        horizontal_clearance_m=traversal_clearance,
                     )
                 ):
                     key = (round(x / resolution), round(y / resolution), round(z / 0.05))
@@ -575,7 +609,9 @@ def _build_traversal_points() -> list[tuple[float, float, float]]:
         if (
             z_min <= centroid[2] <= z_max
             and has_body_clearance_from_obstacles(
-                centroid, _CUSTOM_OBSTACLE_BOUNDS
+                centroid,
+                _CUSTOM_OBSTACLE_BOUNDS,
+                horizontal_clearance_m=traversal_clearance,
             )
         ):
             key = (
@@ -731,30 +767,43 @@ def _build_valid_spawn_points() -> list[tuple[float, float, float]]:
 def _traversal_entry_spawn_points(
     spawn_points: list[tuple[float, float, float]],
 ) -> list[tuple[float, float, float]]:
-    if not spawn_points or not _VALID_TRAVERSAL_POINTS:
-        return []
-    traversal = torch.tensor(_VALID_TRAVERSAL_POINTS, dtype=torch.float32)
-    minimum_z = float(traversal[:, 2].min())
-    elevation_span = float(traversal[:, 2].max()) - minimum_z
-    low = traversal[traversal[:, 2] <= minimum_z + min(0.40, elevation_span * 0.25)]
-    high = traversal[
-        traversal[:, 2] >= minimum_z + max(0.30, elevation_span * 0.60)
-    ]
-    if not len(low) or not len(high):
-        return []
-    entry_chunks: list[torch.Tensor] = []
-    for chunk in low.split(256):
-        horizontal = torch.cdist(chunk[:, :2], high[:, :2])
-        near_high = horizontal.min(dim=1).values <= 5.0
-        if near_high.any():
-            entry_chunks.append(chunk[near_high])
-    if not entry_chunks:
-        return []
-    entries = torch.cat(entry_chunks, dim=0)
-    spawn = torch.tensor(spawn_points, dtype=torch.float32)
-    distance = torch.cdist(spawn[:, :2], entries[:, :2]).min(dim=1).values
-    selected = spawn[distance <= 1.0]
-    result = [tuple(float(value) for value in point) for point in selected.tolist()]
+    traversal_resolution = _spatial_float_env(
+        "SPATIAL_TRAVERSAL_GRID_RESOLUTION", 0.25
+    )
+    result = find_traversal_entry_spawn_points(
+        spawn_points,
+        _VALID_TRAVERSAL_POINTS,
+        neighbor_radius_m=max(0.35, 1.8 * traversal_resolution),
+        min_component_elevation_m=_spatial_float_env(
+            "SPATIAL_TRAVERSAL_ENTRY_MIN_ELEVATION", 0.80
+        ),
+        min_entry_xy_distance_m=_spatial_float_env(
+            "SPATIAL_TRAVERSAL_ENTRY_MIN_DISTANCE", 0.0
+        ),
+    )
+    maximum_fraction = _spatial_float_env(
+        "SPATIAL_MAX_TRAVERSAL_ENTRY_FRACTION", 1.0
+    )
+    fraction = len(result) / max(len(spawn_points), 1)
+    if fraction > maximum_fraction:
+        raise RuntimeError(
+            "Traversal-entry extraction is over-broad: "
+            f"{len(result)}/{len(spawn_points)} points ({fraction:.1%}) exceed "
+            f"the configured {maximum_fraction:.1%}. Check traversal semantics."
+        )
+    if _SPATIAL_MAP_METADATA.get("traversal_entry_count") != len(result):
+        _SPATIAL_MAP_METADATA.update(
+            {
+                "traversal_entry_count": len(result),
+                "traversal_entry_fraction": fraction,
+                "spawn_points": [list(point) for point in result],
+            }
+        )
+        _write_spatial_map(
+            list(_VALID_SPAWN_POINTS or spawn_points),
+            list(_VALID_TRAVERSAL_POINTS),
+            max(_spatial_float_env("SPATIAL_GRID_RESOLUTION", 0.75), 0.25),
+        )
     print(f"[INFO] Traversal-entry spawn candidates: {len(result)}")
     return result
 
@@ -774,7 +823,40 @@ def _reset_root_state_spatially_valid(
             "were found. Fix the profile floor range or configure fallback_floor_z."
         )
     spawn_headings: list[float] | None = None
-    if _INITIAL_SPAWN_POINTS:
+    fixed_spawn_json = os.environ.get("SPATIAL_FIXED_SPAWN_POINTS", "").strip()
+    fixed_heading_json = os.environ.get("SPATIAL_FIXED_SPAWN_HEADINGS", "").strip()
+    if fixed_spawn_json:
+        fixed_points = [
+            tuple(float(value) for value in point)
+            for point in json.loads(fixed_spawn_json)
+        ]
+        fixed_headings = [float(value) for value in json.loads(fixed_heading_json)]
+        if not fixed_points or len(fixed_points) != len(fixed_headings):
+            raise RuntimeError("Fixed spatial spawns and headings must be non-empty and aligned")
+        invalid = [
+            point for point in fixed_points
+            if not _spawn_clearance_is_free(point[0], point[1], point[2])
+        ]
+        if invalid:
+            raise RuntimeError(f"Fixed spatial spawn points lack body clearance: {invalid}")
+        points = fixed_points
+        spawn_headings = fixed_headings
+        _SPATIAL_MAP_METADATA.update(
+            {
+                "spawn_mode": "fixed_verified",
+                "spawn_points": [list(point) for point in points],
+                "spawn_headings": spawn_headings,
+                "traversal_entry_count": len(points),
+                "traversal_entry_fraction": len(points) / max(len(_VALID_SPAWN_POINTS or []), 1),
+            }
+        )
+        _write_spatial_map(
+            list(_VALID_SPAWN_POINTS or points),
+            list(_VALID_TRAVERSAL_POINTS),
+            max(_spatial_float_env("SPATIAL_GRID_RESOLUTION", 0.75), 0.25),
+        )
+        print(f"[INFO] Using {len(points)} fixed traversal-entry spawn candidates")
+    elif _INITIAL_SPAWN_POINTS:
         points = _INITIAL_SPAWN_POINTS
         if len(_INITIAL_SPAWN_HEADINGS) == len(points):
             spawn_headings = _INITIAL_SPAWN_HEADINGS
@@ -799,7 +881,10 @@ def _reset_root_state_spatially_valid(
             spawn_headings, device=asset.device, dtype=root_states.dtype
         )
         yaw = heading_tensor[point_ids]
-        jitter = _spatial_float_env("PROCEDURAL_SPAWN_YAW_JITTER", 0.30)
+        jitter = _spatial_float_env(
+            "SPATIAL_FIXED_SPAWN_YAW_JITTER",
+            _spatial_float_env("PROCEDURAL_SPAWN_YAW_JITTER", 0.30),
+        )
         yaw += torch.empty(len(env_ids), device=asset.device).uniform_(-jitter, jitter)
     else:
         yaw_range = pose_range.get("yaw", (-3.14, 3.14))
@@ -1257,7 +1342,7 @@ def _spawn_hospital_usd(prim_path: str, cfg, translation=None, orientation=None)
     import omni.usd
     prim = spawn_from_usd(prim_path, cfg, translation=translation, orientation=orientation)
     stage = omni.usd.get_context().get_stage()
-    repaired_railings = _repair_hospital_railing_semantics(stage, prim_path)
+    repaired_labels = _reconcile_navigation_semantics(stage, prim_path)
     annotation_count = _count_semantic_annotations(stage, prim_path)
     if annotation_count == 0:
         raise RuntimeError(f"Labeled hospital USD has no semantic annotations: {cfg.usd_path}")
@@ -1269,7 +1354,7 @@ def _spawn_hospital_usd(prim_path: str, cfg, translation=None, orientation=None)
         print(
             f"[INFO] Hospital spawned with {annotation_count} semantic annotations; "
             f"{num_planes} duplicate ground prim(s) deactivated; "
-            f"{repaired_railings} railing label(s) repaired"
+            f"{repaired_labels} navigation label(s) reconciled"
         )
     return prim
 
@@ -1286,6 +1371,7 @@ def _spawn_warehouse_usd(prim_path: str, cfg, translation=None, orientation=None
     import omni.usd
     prim = spawn_from_usd(prim_path, cfg, translation=translation, orientation=orientation)
     stage = omni.usd.get_context().get_stage()
+    repaired_labels = _reconcile_navigation_semantics(stage, prim_path)
     annotation_count = _count_semantic_annotations(stage, prim_path)
     if annotation_count == 0:
         raise RuntimeError(f"Labeled warehouse USD has no semantic annotations: {cfg.usd_path}")
@@ -1296,7 +1382,8 @@ def _spawn_warehouse_usd(prim_path: str, cfg, translation=None, orientation=None
     else:
         print(
             f"[INFO] Warehouse spawned with {annotation_count} semantic annotations; "
-            f"{num_planes} duplicate ground prim(s) deactivated"
+            f"{num_planes} duplicate ground prim(s) deactivated; "
+            f"{repaired_labels} navigation label(s) reconciled"
         )
     return prim
 
@@ -1305,21 +1392,24 @@ def _has_direct_semantic_annotation(prim) -> bool:
     return any("semanticData" in attr.GetName() for attr in prim.GetAttributes())
 
 
-def _repair_hospital_railing_semantics(stage, root_path: str) -> int:
-    """Correct old assets whose stair parent caused rails to be labeled stairs."""
+def _reconcile_navigation_semantics(stage, root_path: str) -> int:
+    """Repair stale structural/walkable labels using leaf-first prim names."""
     root = stage.GetPrimAtPath(root_path)
     if not root or not root.IsValid():
         return 0
     repaired = 0
+    walkable = {"floor", "ramp", "stairs"}
     for prim in Usd.PrimRange(root):
-        path = str(prim.GetPath()).lower()
-        if not any(name in path for name in ("rail", "handrail", "railing")):
+        expected = infer_semantic_class(str(prim.GetPath()))
+        if expected == "misc":
             continue
         updated = False
         for attribute in prim.GetAttributes():
             if "semanticData" in attribute.GetName():
-                attribute.Set("wall")
-                updated = True
+                current = canonical_semantic_class(str(attribute.Get() or ""))
+                if (current in walkable) != (expected in walkable):
+                    attribute.Set(expected)
+                    updated = True
         if updated:
             repaired += 1
     return repaired

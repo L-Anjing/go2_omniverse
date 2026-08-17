@@ -94,14 +94,14 @@ LABEL_RULES: list[tuple[re.Pattern, str]] = [
 
 
 def infer_label(prim: Usd.Prim) -> str | None:
-    """Return a semantic label for *prim*, or None to skip it."""
-    name  = prim.GetName().lower()
-    # Also check parent names for context (e.g. /warehouse/Props/SM_CardBoxA_01)
-    path  = str(prim.GetPath()).lower()
-
-    for pattern, label in LABEL_RULES:
-        if pattern.search(name) or pattern.search(path):
-            return label
+    """Infer leaf-first so broad assembly names cannot mask child geometry."""
+    current = prim
+    while current and current.IsValid() and not current.IsPseudoRoot():
+        name = current.GetName().lower()
+        for pattern, label in LABEL_RULES:
+            if pattern.search(name):
+                return label
+        current = current.GetParent()
     return None
 
 

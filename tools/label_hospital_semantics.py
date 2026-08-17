@@ -88,14 +88,14 @@ LABEL_RULES: list[tuple[re.Pattern, str]] = [
 
 
 def infer_label(prim: Usd.Prim) -> str | None:
-    """Return a semantic label for *prim*, or None to skip it."""
-    name  = prim.GetName().lower()
-    # Also check parent names for context (e.g. /hospital/Furniture/Chair_01)
-    path  = str(prim.GetPath()).lower()
-
-    for pattern, label in LABEL_RULES:
-        if pattern.search(name) or pattern.search(path):
-            return label
+    """Infer leaf-first so a stair/rail parent cannot mask child geometry."""
+    current = prim
+    while current and current.IsValid() and not current.IsPseudoRoot():
+        name = current.GetName().lower()
+        for pattern, label in LABEL_RULES:
+            if pattern.search(name):
+                return label
+        current = current.GetParent()
     return None
 
 
@@ -122,7 +122,7 @@ def main() -> None:
 
     output_path = Path(args.output)
     if not output_path.is_absolute():
-        output_path = Path(__file__).parent / output_path
+        output_path = Path(__file__).parent.parent / output_path
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     print(f"[INFO] Opening stage: {HOSPITAL_USD}")

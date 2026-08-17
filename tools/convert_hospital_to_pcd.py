@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate a dense world-frame PCD directly from the Hospital USD asset.
+"""Generate a dense world-frame PCD directly from a composed USD asset.
 
 Features:
   - Traverses Instance Proxies.
@@ -28,6 +28,9 @@ def import_usd():
         pass
 
     candidates = []
+    candidates.extend(glob.glob(
+        os.path.join(sys.prefix, "lib/python*/site-packages/isaacsim/extscache/omni.usd.libs-*")
+    ))
     isaac_path = os.environ.get("ISAAC_PATH")
     if isaac_path:
         candidates.append(isaac_path)
@@ -37,8 +40,11 @@ def import_usd():
     ])
 
     for root in candidates:
-        for usd_lib in glob.glob(os.path.join(root, "extscache", "omni.usd.libs-*")):
-            if os.path.isdir(os.path.join(usd_lib, "pxr")):
+        usd_libs = [root] if os.path.basename(root).startswith("omni.usd.libs-") else glob.glob(
+            os.path.join(root, "extscache", "omni.usd.libs-*")
+        )
+        for usd_lib in usd_libs:
+            if os.path.isdir(os.path.join(usd_lib, "pxr")) or os.path.isdir(usd_lib):
                 bin_dir = os.path.join(usd_lib, "bin")
                 ld_paths = os.environ.get("LD_LIBRARY_PATH", "").split(":")
                 if bin_dir not in ld_paths and os.environ.get("USD_LIBS_REEXEC") != "1":
@@ -64,14 +70,16 @@ DEFAULT_USD = os.path.join(
     os.environ.get("ISAAC_ASSETS_ROOT", DEFAULT_ASSETS_ROOT),
     "Isaac/Environments/Hospital/hospital.usd",
 )
-DEFAULT_OUT = "/media/user/data1/carl/workspace/go2_omniverse/tmp/hospital_gt.pcd"
-DEFAULT_PCT_OUT = "/media/user/data1/carl/workspace/3d-navi/PCT_planner/rsc/pcd/hospital.pcd"
+DEFAULT_OUT_DIR = "/media/user/data1/carl/workspace/go2_omniverse/tmp"
+DEFAULT_PCT_DIR = "/media/user/data1/carl/workspace/3d-navi/PCT_planner/rsc/pcd"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Sample Hospital USD mesh surfaces into a dense PCD")
+    parser = argparse.ArgumentParser(description="Sample a composed USD scene into a dense PCD")
     parser.add_argument("--usd", default=DEFAULT_USD, help="Input USD stage")
-    parser.add_argument("--out", default=DEFAULT_OUT, help="Output PCD path")
+    parser.add_argument("--scene-id", default="", help="Output identifier; defaults to the USD filename")
+    parser.add_argument("--out", default="", help="Optional diagnostic PCD path")
+    parser.add_argument("--pct-out", default="", help="PCT PCD path; defaults to rsc/pcd/<scene-id>.pcd")
     parser.add_argument("--target-points", type=int, default=0, help="Explicit target samples; 0 uses density")
     parser.add_argument("--points-per-square-meter", type=float, default=2000.0, help="Sampling density (raised for thin-structure coverage: wheelchairs, bed frames)")
     parser.add_argument("--voxel-size", type=float, default=0.015, help="Voxel size (<=0 disables; reduced for thin-structure preservation)")
@@ -79,7 +87,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-size", type=int, default=1_000_000)
     parser.add_argument("--min-samples-per-triangle", type=int, default=2)
     parser.add_argument("--include-invisible", action="store_true", default=True, help="Sample invisible meshes (often collision maps)")
-    parser.add_argument("--exclude-regex", default=r"CollisionPlane|collisionPlane", help="Skip meshes by regex")
+    parser.add_argument(
+        "--exclude-regex",
+        default=r"CollisionPlane|collisionPlane|SkySphere|SkyDome|Sky_Sphere",
+        help="Skip presentation or collision-only meshes by regex",
+    )
     parser.add_argument("--min-z", type=float, default=None)
     parser.add_argument("--max-z", type=float, default=None)
     return parser.parse_args()
@@ -205,6 +217,9 @@ def write_binary_pcd(path: str, points: np.ndarray) -> None:
 
 def main() -> None:
     args = parse_args()
+    scene_id = args.scene_id.strip() or Path(args.usd).stem
+    out_path = args.out.strip() or os.path.join(DEFAULT_OUT_DIR, f"{scene_id}_gt.pcd")
+    pct_out_path = args.pct_out.strip() or os.path.join(DEFAULT_PCT_DIR, f"{scene_id}.pcd")
     stage = Usd.Stage.Open(args.usd)
     if stage is None: raise RuntimeError(f"Failed to open USD: {args.usd}")
     stage.Load()
@@ -312,12 +327,13 @@ def main() -> None:
         _, keep = np.unique(keys, axis=0, return_index=True)
         points = points[np.sort(keep)]
 
-    write_binary_pcd(args.out, points)
-    if os.path.abspath(args.out) != os.path.abspath(DEFAULT_PCT_OUT):
-        write_binary_pcd(DEFAULT_PCT_OUT, points)
+    write_binary_pcd(out_path, points)
+    if os.path.abspath(out_path) != os.path.abspath(pct_out_path):
+        write_binary_pcd(pct_out_path, points)
 
     print(f"\n[OK] Success! Final points: {len(points)} (Down from {before_voxel})")
-    print(f"  Saved to: {args.out}")
+    print(f"  Diagnostic PCD: {out_path}")
+    print(f"  PCT PCD:        {pct_out_path}")
 
 if __name__ == "__main__":
     main()
