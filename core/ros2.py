@@ -132,77 +132,76 @@ def attach_usd_to_sensor(sensor_path: str, usd_path: str, visible=True):
         prim = stage.GetPrimAtPath(path)
         prim.GetAttribute("visibility").Set("inherited")
 
-def add_camera(num_envs, robot_type, camera_mode="single"):
-    """Create IsaacLab Camera sensors for each environment.
+DEFAULT_FRONT_CAM_EXTRINSIC = np.asarray(
+    [
+        [0.0, 0.0, 1.0, 0.32487],
+        [-1.0, 0.0, 0.0, -0.00095],
+        [0.0, -1.0, 0.0, 0.05362],
+        [0.0, 0.0, 0.0, 1.0],
+    ],
+    dtype=np.float64,
+)
 
-    When *camera_mode* is ``"double"``, two cameras are created per env:
-    ``front_cam_left`` and ``front_cam_right``.  Their positions are offset
-    ±5 cm laterally from the default center position to match the stereo
-    camera layout in ``go2_double_camera.usd``.
-    """
-    # Default position / rotation for Go2 front_cam (center).
-    # Indoor world-model collection does not benefit from kilometre-scale
-    # background values. A 30 m far plane also makes no-hit depth explicit.
-    DEFAULT_POS = (0.32487, -0.00095, 0.05362)
-    DEFAULT_ROT = (0.5, -0.5, 0.5, -0.5)  # w,x,y,z ROS convention
 
-    # Optional nose-down camera tilt (degrees) for a head-mounted RGB-D rig
-    # (e.g. RealSense D455) that needs more floor/tread in view while
-    # climbing.  Zero keeps the stock horizontal Go2 front camera exactly as
-    # before, so existing datasets and extrinsic configs are unaffected.
-    # Set CAMERA_TILT_DEG in the environment to enable the tilted view; the
-    # matching extrinsic must then be used by the collector (see
-    # Data_collection/configs/collector.yaml camera_extrinsic notes).
-    tilt_deg = 0.0
-    try:
-        tilt_deg = float(os.environ.get("CAMERA_TILT_DEG", "0"))
-    except (TypeError, ValueError):
-        tilt_deg = 0.0
-    if abs(tilt_deg) > 0.0:
-        # Nose-down tilt: rotate the optical axis about the BASE x axis by
-        # tilt_deg (positive = camera looks down).  The stock camera looks
-        # along base -y (optical axis [0,-1,0]); after tilting it points at
-        # [0, -cos(tilt), -sin(tilt)].
-        #
-        # Composition: q_new = q_stock * q_tilt^-1.  (q_tilt is a rotation
-        # about base x; its inverse applied on the right tilts the camera's
-        # view downward.  Verified: tilt=15 -> optical axis [0,-0.966,-0.259],
-        # and tilt=0 reproduces the stock quaternion bit-for-bit.)
-        theta = float(np.radians(tilt_deg))
-        c2, s2 = np.cos(theta * 0.5), np.sin(theta * 0.5)
-        q_tilt = np.asarray([c2, s2, 0.0, 0.0], dtype=np.float64)  # w,x,y,z
-        q_tilt_inv = np.asarray([q_tilt[0], -q_tilt[1], -q_tilt[2], -q_tilt[3]])
-        q_stock = np.asarray(DEFAULT_ROT, dtype=np.float64)  # w,x,y,z
-        w1, x1, y1, z1 = q_stock
-        w2, x2, y2, z2 = q_tilt_inv
-        q_new = np.asarray(
-            [
-                w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-                w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-                w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-                w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-            ],
-            dtype=np.float64,
-        )
-        norm = float(np.linalg.norm(q_new))
-        if norm > 1e-12:
-            q_new = q_new / norm
-        DEFAULT_ROT = (float(q_new[0]), float(q_new[1]), float(q_new[2]), float(q_new[3]))
-        print(
-            f"[INFO] Camera tilt enabled: {tilt_deg:.1f} deg nose-down; "
-            f"front_cam rot(wxyz)={DEFAULT_ROT}",
-            flush=True,
-        )
-
-    if camera_mode == "double":
-        cam_configs = [
-            ("front_cam_left",  (DEFAULT_POS[0], -0.05, DEFAULT_POS[2]), DEFAULT_ROT),
-            ("front_cam_right", (DEFAULT_POS[0],  0.05, DEFAULT_POS[2]), DEFAULT_ROT),
-        ]
+def _rotation_matrix_to_quaternion_wxyz(rotation: np.ndarray) -> tuple[float, ...]:
+    """Convert a proper 3×3 rotation matrix to a normalized wxyz quaternion."""
+    matrix = np.asarray(rotation, dtype=np.float64)
+    trace = float(np.trace(matrix))
+    if trace > 0.0:
+        scale = 2.0 * np.sqrt(trace + 1.0)
+        w = 0.25 * scale
+        x = (matrix[2, 1] - matrix[1, 2]) / scale
+        y = (matrix[0, 2] - matrix[2, 0]) / scale
+        z = (matrix[1, 0] - matrix[0, 1]) / scale
     else:
-        cam_configs = [
-            ("front_cam", DEFAULT_POS, DEFAULT_ROT),
-        ]
+        index = int(np.argmax(np.diag(matrix)))
+        if index == 0:
+            scale = 2.0 * np.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2])
+            w = (matrix[2, 1] - matrix[1, 2]) / scale
+            x = 0.25 * scale
+            y = (matrix[0, 1] + matrix[1, 0]) / scale
+            z = (matrix[0, 2] + matrix[2, 0]) / scale
+        elif index == 1:
+            scale = 2.0 * np.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2])
+            w = (matrix[0, 2] - matrix[2, 0]) / scale
+            x = (matrix[0, 1] + matrix[1, 0]) / scale
+            y = 0.25 * scale
+            z = (matrix[1, 2] + matrix[2, 1]) / scale
+        else:
+            scale = 2.0 * np.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1])
+            w = (matrix[1, 0] - matrix[0, 1]) / scale
+            x = (matrix[0, 2] + matrix[2, 0]) / scale
+            y = (matrix[1, 2] + matrix[2, 1]) / scale
+            z = 0.25 * scale
+    quaternion = np.asarray((w, x, y, z), dtype=np.float64)
+    quaternion /= np.linalg.norm(quaternion)
+    if quaternion[0] < 0.0:
+        quaternion *= -1.0
+    return tuple(float(value) for value in quaternion)
+
+
+def front_camera_pose() -> tuple[tuple[float, ...], tuple[float, ...]]:
+    """Return the configured base-to-front-camera translation and quaternion."""
+    raw = os.environ.get("FRONT_CAM_EXTRINSIC", "").replace(",", " ").split()
+    transform = DEFAULT_FRONT_CAM_EXTRINSIC.copy()
+    if raw:
+        if len(raw) != 16:
+            raise ValueError("FRONT_CAM_EXTRINSIC must contain 16 row-major values")
+        transform = np.asarray([float(value) for value in raw], dtype=np.float64).reshape(4, 4)
+    rotation = transform[:3, :3]
+    if not np.allclose(transform[3], (0.0, 0.0, 0.0, 1.0), atol=1e-6):
+        raise ValueError("FRONT_CAM_EXTRINSIC last row must be [0, 0, 0, 1]")
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5) or not np.isclose(
+        np.linalg.det(rotation), 1.0, atol=1e-5
+    ):
+        raise ValueError("FRONT_CAM_EXTRINSIC rotation must be orthonormal with det(R)=1")
+    return tuple(transform[:3, 3]), _rotation_matrix_to_quaternion_wxyz(rotation)
+
+
+def add_camera(num_envs):
+    """Create one front_cam IsaacLab sensor for each environment."""
+    position, rotation = front_camera_pose()
+    cam_configs = [("front_cam", position, rotation)]
 
     for i in range(num_envs):
         for cam_name, pos, rot in cam_configs:
@@ -234,34 +233,7 @@ def add_camera(num_envs, robot_type, camera_mode="single"):
                 ),
             )
 
-            if robot_type == "g1":
-                cameraCfg.prim_path = f"/World/envs/env_{i}/Robot/head_link/{cam_name}"
-                cameraCfg.offset = CameraCfg.OffsetCfg(
-                    pos=(0.0, 0.0, 0.0), rot=(0.5, -0.5, 0.5, -0.5), convention="ros"
-                )
-
             Camera(cameraCfg)
-
-def add_copter_camera():
-
-    cameraCfg = CameraCfg(
-        prim_path=f"/World/Crazyflie/Robot_1/body/front_cam_2",
-        update_period=0.1,
-        height=480,
-        width=640,
-        data_types=["rgb"],
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0,
-            focus_distance=400.0,
-            horizontal_aperture=20.955,
-            clipping_range=(0.1, 1.0e5),
-        ),
-        offset=CameraCfg.OffsetCfg(
-            pos=(0.0, 0.0, -0.2), rot=(0.0, 0.0, 1.0, 0.0), convention="ros"
-        ),
-    )
-
-    Camera(cameraCfg)
 
 def pub_robo_data_ros2(
     robot_type,
@@ -370,24 +342,23 @@ class RobotBaseNode(Node):
                 self.create_publisher(Twist, f"robot{i}/base_command", qos_profile)
             )
 
-        # Broadcast fixed camera frame TF once (base_link → front_cam).
-        # Parameters from CameraCfg.OffsetCfg: pos=(0.32487,-0.00095,0.05362)
-        # rot=(w=0.5, x=-0.5, y=0.5, z=-0.5) in ROS convention.
-        # This TF is per-robot but the offset is identical for all envs.
+        # Broadcast the same configurable base-to-camera transform used by
+        # CameraCfg so rendered data and ROS TF cannot diverge.
+        camera_position, camera_rotation = front_camera_pose()
+        qw, qx, qy, qz = camera_rotation
         static_tfs = []
         for i in range(num_envs):
             cam_tf = TransformStamped()
             cam_tf.header.stamp = self.get_clock().now().to_msg()
             cam_tf.header.frame_id = f"robot{i}/base_link"
             cam_tf.child_frame_id = f"robot{i}/front_cam"
-            cam_tf.transform.translation.x = 0.32487
-            cam_tf.transform.translation.y = -0.00095
-            cam_tf.transform.translation.z = 0.05362
-            # geometry_msgs/Quaternion uses (x,y,z,w)
-            cam_tf.transform.rotation.x = -0.5
-            cam_tf.transform.rotation.y = 0.5
-            cam_tf.transform.rotation.z = -0.5
-            cam_tf.transform.rotation.w = 0.5
+            cam_tf.transform.translation.x = camera_position[0]
+            cam_tf.transform.translation.y = camera_position[1]
+            cam_tf.transform.translation.z = camera_position[2]
+            cam_tf.transform.rotation.x = qx
+            cam_tf.transform.rotation.y = qy
+            cam_tf.transform.rotation.z = qz
+            cam_tf.transform.rotation.w = qw
             static_tfs.append(cam_tf)
         self.static_broadcaster.sendTransform(static_tfs)
 

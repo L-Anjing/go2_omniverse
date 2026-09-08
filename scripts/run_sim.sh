@@ -80,41 +80,25 @@ print(f"[INFO] torchvision={torchvision.__version__} ({torchvision.__file__})")
 PY
 
 # 4. 运行参数配置
-DEPLOY_ARCHITECTURE="${DEPLOY_ARCHITECTURE:-moe_cts}"
-if [ -z "${EXPERIMENT_NAME:-}" ]; then
-    if [ "$DEPLOY_ARCHITECTURE" = "moe_cts" ]; then
-        EXPERIMENT_NAME="unitree_go2_fullscene_moe_cts"
-    else
-        EXPERIMENT_NAME="unitree_go2_fullscene_cts"
-    fi
-fi
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-unitree_go2_fullscene_moe_cts}"
 LOAD_RUN="${LOAD_RUN:-.*}"
 CHECKPOINT="${CHECKPOINT:-model_164000.pt}"
 CMD_SOURCE="${CMD_SOURCE:-ros2}"
-VIEWER_FOLLOW="${VIEWER_FOLLOW:-off}"
 RENDERING_MODE="${RENDERING_MODE:-quality}"
-CAMERA_MODE="${CAMERA_MODE:-single}"
-ENABLE_DEPTH="${ENABLE_DEPTH:-true}"
 HEADLESS="${HEADLESS:-0}"
 CUSTOM_ENV="${CUSTOM_ENV:-hospital}"
 ROBOT_AMOUNT="${ROBOT_AMOUNT:-1}"
 
 # 5. 启动主程序
 echo "[INFO] Launching main simulation..."
-echo "[INFO] Deploy architecture: ${DEPLOY_ARCHITECTURE}"
+echo "[INFO] Deploy architecture: moe_cts"
 echo "[INFO] Experiment: ${EXPERIMENT_NAME}"
 echo "[INFO] Checkpoint pattern: ${CHECKPOINT}"
 echo "[INFO] Rendering mode: ${RENDERING_MODE}"
-echo "[INFO] Camera mode: ${CAMERA_MODE}"
-echo "[INFO] Depth enabled: ${ENABLE_DEPTH}"
+echo "[INFO] Camera: front_cam"
 echo "[INFO] Headless: ${HEADLESS}"
 echo "[INFO] Custom environment: ${CUSTOM_ENV}"
 echo "[INFO] Robot environments: ${ROBOT_AMOUNT}"
-# Build depth flag conditionally
-ENABLE_DEPTH_FLAG=""
-if [ "${ENABLE_DEPTH}" = "true" ] || [ "${ENABLE_DEPTH}" = "True" ]; then
-    ENABLE_DEPTH_FLAG="--enable_depth"
-fi
 HEADLESS_FLAG=""
 if [ "${HEADLESS}" = "1" ] || [ "${HEADLESS}" = "true" ] || [ "${HEADLESS}" = "True" ]; then
     HEADLESS_FLAG="--headless"
@@ -124,17 +108,12 @@ cd "${REPO_ROOT}"
 export TF_CPP_MIN_LOG_LEVEL=2  # 只对 tensorflow 有效
 exec python -u main.py \
     --robot_amount "${ROBOT_AMOUNT}" \
-    --robot go2 \
     --device cuda \
     ${HEADLESS_FLAG} \
     --enable_cameras \
     --rendering_mode "${RENDERING_MODE}" \
     --custom_env "${CUSTOM_ENV}" \
     --cmd_source "${CMD_SOURCE}" \
-    --deploy_architecture "${DEPLOY_ARCHITECTURE}" \
-    --viewer_follow "${VIEWER_FOLLOW}" \
-    --camera_mode "${CAMERA_MODE}" \
-    ${ENABLE_DEPTH_FLAG} \
     --experiment_name "${EXPERIMENT_NAME}" \
     --load_run "${LOAD_RUN}" \
     --checkpoint "${CHECKPOINT}"

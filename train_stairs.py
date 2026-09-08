@@ -33,11 +33,9 @@ Critic obs  (teacher encoder, 263D, clean):
 Usage
 -----
     python train_stairs.py --headless --num_envs 4096 --max_iterations 150000 \
-        --architecture cts --experiment_name unitree_go2_fullscene_cts
+        --experiment_name unitree_go2_fullscene_moe_cts
     python train_stairs.py --headless --num_envs 4096 --max_iterations 150000 \
-        --architecture moe_cts --experiment_name unitree_go2_fullscene_moe_cts
-    python train_stairs.py --headless --num_envs 4096 --max_iterations 150000 \
-        --architecture moe_cts --experiment_name unitree_go2_fullscene_moe_cts \
+        --experiment_name unitree_go2_fullscene_moe_cts \
         --checkpoint logs/rsl_rl/unitree_go2_fullscene_moe_cts/seed_123/model_14000.pt
 """
 
@@ -48,17 +46,14 @@ from dataclasses import field
 from isaaclab.app import AppLauncher
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
-parser = argparse.ArgumentParser(description="Train Go2 stair climbing with CTS or MoE-CTS")
+parser = argparse.ArgumentParser(description="Train the Go2 MoE-CTS locomotion policy")
 parser.add_argument("--num_envs",        type=int,   default=4096)
 parser.add_argument("--max_iterations",  type=int,   default=150000)
 parser.add_argument("--checkpoint",      type=str,   default="",
                     help="Resume from a CTS checkpoint (.pt)")
 parser.add_argument("--seed",            type=int,   default=42)
 parser.add_argument("--experiment_name", type=str,   default="",
-                    help="Override experiment name; default follows architecture.")
-parser.add_argument("--architecture",    type=str,   default="cts",
-                    choices=("cts", "moe_cts"),
-                    help="Training architecture. 'moe_cts' matches the reference MoE-CTS structure.")
+                    help="Override the default MoE-CTS experiment name.")
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
@@ -1520,31 +1515,23 @@ class Go2StairTrainCfg(UnitreeGo2RoughEnvCfg):
         )
 
 
-# ── CTS / MoE-CTS training configuration ─────────────────────────────────────
-def _default_experiment_name(architecture: str) -> str:
-    if architecture == "moe_cts":
-        return "unitree_go2_fullscene_moe_cts"
-    return "unitree_go2_fullscene_cts"
-
-
+# ── MoE-CTS training configuration ───────────────────────────────────────────
 def _make_train_cfg(
     num_envs: int,
     max_iterations: int,
     experiment_name: str,
-    architecture: str,
 ) -> dict:
-    """Build a reference-style train config dict."""
-    policy_class_name = "ActorCriticCTS"
-    algorithm_class_name = "CTS"
+    """Build the MoE-CTS training configuration."""
     policy_cfg = {
         "actor_hidden_dims":           [512, 256, 128],
         "critic_hidden_dims":          [512, 256, 128],
         "teacher_encoder_hidden_dims": [512, 256],
-        "student_encoder_hidden_dims": [512, 256],
+        "student_encoder_hidden_dims": [512, 256, 256],
         "activation":     "elu",
         "init_noise_std": 1.0,
         "latent_dim":     32,
         "norm_type":      "l2norm",
+        "expert_num":     8,
     }
     alg_cfg = {
         "value_loss_coef":              1.0,
@@ -1561,14 +1548,8 @@ def _make_train_cfg(
         "desired_kl":      0.01,
         "max_grad_norm":   1.0,
         "teacher_env_ratio": 0.75,
+        "load_balance_coef": 0.01,
     }
-
-    if architecture == "moe_cts":
-        policy_class_name = "ActorCriticMoECTS"
-        algorithm_class_name = "MoECTS"
-        policy_cfg["student_encoder_hidden_dims"] = [512, 256, 256]
-        policy_cfg["expert_num"] = 8
-        alg_cfg["load_balance_coef"] = 0.01
 
     return {
         # Architecture
@@ -1576,8 +1557,8 @@ def _make_train_cfg(
         "policy": policy_cfg,
         "algorithm": alg_cfg,
         "runner": {
-            "policy_class_name": policy_class_name,
-            "algorithm_class_name": algorithm_class_name,
+            "policy_class_name": "ActorCriticMoECTS",
+            "algorithm_class_name": "MoECTS",
             "num_steps_per_env": 48 if num_envs <= 4096 else 24,
             "max_iterations": max_iterations,
             "save_interval": 500,
@@ -1605,12 +1586,11 @@ def main():
     assert env.num_privileged_obs > 0, \
         "Critic obs group not detected — check Go2StairCriticObsCfg is registered."
 
-    experiment_name = args_cli.experiment_name or _default_experiment_name(args_cli.architecture)
+    experiment_name = args_cli.experiment_name or "unitree_go2_fullscene_moe_cts"
     train_cfg = _make_train_cfg(
         args_cli.num_envs,
         args_cli.max_iterations,
         experiment_name,
-        args_cli.architecture,
     )
     log_dir   = os.path.abspath(
         os.path.join(
@@ -1622,7 +1602,7 @@ def main():
     )
 
     print(
-        f"[INFO] Training architecture={args_cli.architecture} "
+        "[INFO] Training architecture=moe_cts "
         f"policy={train_cfg['runner']['policy_class_name']} "
         f"algorithm={train_cfg['runner']['algorithm_class_name']}"
     )

@@ -5,7 +5,6 @@
 #   ./run_train_stairs.sh              # both GPUs, 4096 envs, 150000 iters
 #   ./run_train_stairs.sh 2048 3000    # custom envs / iters
 #   CHECKPOINT=logs/.../model_14000.pt ./run_train_stairs.sh  # optional warm start
-#   ARCHITECTURE=moe_cts ./run_train_stairs.sh                # reference-style MoE-CTS
 #
 # Output:
 #   logs/train_stairs_logs/train_gpu0.log / logs/train_stairs_logs/train_gpu0.pid  — GPU 0 (seed 123)
@@ -39,14 +38,7 @@ fi
 CHECKPOINT="${CHECKPOINT:-}"
 #CHECKPOINT="${CHECKPOINT:-/media/user/data1/carl/workspace/go2_omniverse/logs/rsl_rl/unitree_go2_stairs/model_1800.pt}"
 
-ARCHITECTURE="${ARCHITECTURE:-moe_cts}"
-if [ -z "${EXPERIMENT_NAME:-}" ]; then
-    if [ "$ARCHITECTURE" = "moe_cts" ]; then
-        EXPERIMENT_NAME="unitree_go2_fullscene_moe_cts"
-    else
-        EXPERIMENT_NAME="unitree_go2_fullscene_cts"
-    fi
-fi
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-unitree_go2_fullscene_moe_cts}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "$REPO_ROOT"
@@ -59,7 +51,6 @@ conda activate "${CONDA_ENV_NAME}"
 # GPU 0 — seed 123
 nohup env CUDA_VISIBLE_DEVICES=0 python train_stairs.py \
     --headless \
-    --architecture "$ARCHITECTURE" \
     --num_envs "$NUM_ENVS" \
     --max_iterations "$MAX_ITER" \
     --checkpoint "$CHECKPOINT" \
@@ -67,12 +58,11 @@ nohup env CUDA_VISIBLE_DEVICES=0 python train_stairs.py \
     --seed 123 \
     > logs/train_stairs_logs/train_gpu0.log 2>&1 &
 echo $! > logs/train_stairs_logs/train_gpu0.pid
-echo "GPU0 training started (PID=$(cat logs/train_stairs_logs/train_gpu0.pid), arch='${ARCHITECTURE}', checkpoint='${CHECKPOINT:-scratch}')"
+echo "GPU0 MoE-CTS training started (PID=$(cat logs/train_stairs_logs/train_gpu0.pid), checkpoint='${CHECKPOINT:-scratch}')"
 
 # GPU 1 — seed 42
 nohup env CUDA_VISIBLE_DEVICES=1 python train_stairs.py \
     --headless \
-    --architecture "$ARCHITECTURE" \
     --num_envs "$NUM_ENVS" \
     --max_iterations "$MAX_ITER" \
     --checkpoint "$CHECKPOINT" \
@@ -80,7 +70,7 @@ nohup env CUDA_VISIBLE_DEVICES=1 python train_stairs.py \
     --seed 42 \
     > logs/train_stairs_logs/train_gpu1.log 2>&1 &
 echo $! > logs/train_stairs_logs/train_gpu1.pid
-echo "GPU1 training started (PID=$(cat logs/train_stairs_logs/train_gpu1.pid), arch='${ARCHITECTURE}', checkpoint='${CHECKPOINT:-scratch}')"
+echo "GPU1 MoE-CTS training started (PID=$(cat logs/train_stairs_logs/train_gpu1.pid), checkpoint='${CHECKPOINT:-scratch}')"
 
 echo ""
 echo "Monitor: tail -f logs/train_stairs_logs/train_gpu0.log | grep -E '\\[(CTS|MoECTS)|ERROR|Traceback'"

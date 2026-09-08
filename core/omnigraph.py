@@ -36,23 +36,14 @@ def _build_graph_name(robot_num: int, cam_prim_name: str, stream: str) -> str:
 
     >>> _build_graph_name(0, "front_cam", "rgb")
     '/ROS_front_cam0_rgb'
-    >>> _build_graph_name(0, "front_cam_left", "depth")
-    '/ROS_front_cam0_left_depth'
     """
-    # Use the last segment of the prim name to keep graph paths short.
-    # front_cam → cam,  front_cam_left → left,  front_cam_right → right
-    parts = cam_prim_name.split("_")
-    if parts[-1] in ("left", "right"):
-        short = parts[-1]  # left / right
-    else:
-        short = parts[-1]  # cam (or whatever the last token is)
+    short = cam_prim_name.split("_")[-1]
     return f"/ROS_front_cam{robot_num}_{short}_{stream}"
 
 
 def _create_one_camera_omnigraphs(
     robot_num: int,
     cam_prim_name: str,
-    enable_depth: bool,
 ):
     """Create one shared Omnigraph for a single camera prim.
 
@@ -65,32 +56,29 @@ def _create_one_camera_omnigraphs(
     robot_num : int
         Environment index.
     cam_prim_name : str
-        Camera prim name, e.g. ``"front_cam"``, ``"front_cam_left"``.
-    enable_depth : bool
-        Whether to create the depth publishing graph.
+        Camera prim name. The supported sensor is ``"front_cam"``.
     """
     keys = og.Controller.Keys
     camera_prim = f"/World/envs/env_{robot_num}/Robot/base/{cam_prim_name}"
 
-    # Topic prefix uses the prim name directly so ROS consumers can
-    # distinguish left / right:  robot0/front_cam_left/rgb  etc.
     topic_prefix = f"robot{robot_num}/{cam_prim_name}"
     # Frame id follows the same scheme.
     frame_id = f"robot{robot_num}/{cam_prim_name}"
 
-    publishers = ["RGBPublisher", "SemanticPublisher", "CameraInfoPublisher"]
+    publishers = [
+        "RGBPublisher",
+        "DepthPublisher",
+        "SemanticPublisher",
+        "CameraInfoPublisher",
+    ]
     create_nodes = [
         ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
         ("IsaacCreateRenderProduct", "isaacsim.core.nodes.IsaacCreateRenderProduct"),
         ("RGBPublisher", "isaacsim.ros2.bridge.ROS2CameraHelper"),
+        ("DepthPublisher", "isaacsim.ros2.bridge.ROS2CameraHelper"),
         ("SemanticPublisher", "isaacsim.ros2.bridge.ROS2CameraHelper"),
         ("CameraInfoPublisher", "isaacsim.ros2.bridge.ROS2CameraInfoHelper"),
     ]
-    if enable_depth:
-        publishers.insert(1, "DepthPublisher")
-        create_nodes.insert(
-            3, ("DepthPublisher", "isaacsim.ros2.bridge.ROS2CameraHelper")
-        )
 
     set_values = [
         ("IsaacCreateRenderProduct.inputs:cameraPrim", camera_prim),
@@ -101,6 +89,10 @@ def _create_one_camera_omnigraphs(
         ("RGBPublisher.inputs:topicName", f"{topic_prefix}/rgb"),
         ("RGBPublisher.inputs:frameId", frame_id),
         ("RGBPublisher.inputs:useSystemTime", False),
+        ("DepthPublisher.inputs:type", "depth"),
+        ("DepthPublisher.inputs:topicName", f"{topic_prefix}/depth"),
+        ("DepthPublisher.inputs:frameId", frame_id),
+        ("DepthPublisher.inputs:useSystemTime", False),
         ("SemanticPublisher.inputs:type", "semantic_segmentation"),
         (
             "SemanticPublisher.inputs:topicName",
@@ -117,16 +109,6 @@ def _create_one_camera_omnigraphs(
         ("CameraInfoPublisher.inputs:frameId", frame_id),
         ("CameraInfoPublisher.inputs:useSystemTime", False),
     ]
-    if enable_depth:
-        set_values.extend(
-            [
-                ("DepthPublisher.inputs:type", "depth"),
-                ("DepthPublisher.inputs:topicName", f"{topic_prefix}/depth"),
-                ("DepthPublisher.inputs:frameId", frame_id),
-                ("DepthPublisher.inputs:useSystemTime", False),
-            ]
-        )
-
     connections = [
         ("OnPlaybackTick.outputs:tick", "IsaacCreateRenderProduct.inputs:execIn")
     ]
@@ -158,49 +140,20 @@ def _create_one_camera_omnigraphs(
     )
 
 
-def create_front_cam_omnigraph(
-    robot_num: int,
-    camera_mode: str = "single",
-    enable_depth: bool = False,
-):
-    """Create OmniGraph pipelines for robot front camera(s).
+def create_front_cam_omnigraph(robot_num: int):
+    """Create the OmniGraph pipelines for one robot front_cam.
 
     Parameters
     ----------
     robot_num : int
         Environment index (0, 1, …).
-    camera_mode : str
-        ``"single"`` — one center camera (``front_cam``).
-        ``"double"`` — stereo pair (``front_cam_left``, ``front_cam_right``).
-    enable_depth : bool
-        When True, publish ``/depth`` topics alongside ``/rgb``.
-        Default False (controlled by ``--enable_depth`` / ``ENABLE_DEPTH``).
-
-    Published topics (single)
-    -------------------------
+    Published topics
+    ----------------
     - ``robot{N}/front_cam/rgb``
-    - ``robot{N}/front_cam/depth``             (only if *enable_depth*)
+    - ``robot{N}/front_cam/depth``
     - ``robot{N}/front_cam/semantic_segmentation``
     - ``robot{N}/front_cam/semantic_segmentation_labels``
     - ``robot{N}/front_cam/camera_info``
 
-    Published topics (double)
-    -------------------------
-    - ``robot{N}/front_cam_left/rgb``
-    - ``robot{N}/front_cam_right/rgb``
-    - ``robot{N}/front_cam_left/depth``        (only if *enable_depth*)
-    - ``robot{N}/front_cam_right/depth``       (only if *enable_depth*)
-    - ``robot{N}/front_cam_left/semantic_segmentation``
-    - ``robot{N}/front_cam_right/semantic_segmentation``
-    - ``robot{N}/front_cam_left/semantic_segmentation_labels``
-    - ``robot{N}/front_cam_right/semantic_segmentation_labels``
-    - ``robot{N}/front_cam_left/camera_info``
-    - ``robot{N}/front_cam_right/camera_info``
     """
-    if camera_mode == "double":
-        cam_prim_names = ["front_cam_left", "front_cam_right"]
-    else:
-        cam_prim_names = ["front_cam"]
-
-    for cam_prim_name in cam_prim_names:
-        _create_one_camera_omnigraphs(robot_num, cam_prim_name, enable_depth)
+    _create_one_camera_omnigraphs(robot_num, "front_cam")

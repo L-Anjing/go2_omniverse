@@ -6,10 +6,8 @@
 #   from rsl_rl_cts import CTSRunner
 
 from .cts_runner import CTSRunner
-from .actor_critic_cts import ActorCriticCTS
 from .actor_critic_moe_cts import ActorCriticMoECTS
-from .cts_algorithm import CTS
 from .moe_cts_algorithm import MoECTS
 from .rollout_storage_cts import RolloutStorageCTS
 
-__all__ = ["CTSRunner", "ActorCriticCTS", "ActorCriticMoECTS", "CTS", "MoECTS", "RolloutStorageCTS"]
+__all__ = ["CTSRunner", "ActorCriticMoECTS", "MoECTS", "RolloutStorageCTS"]

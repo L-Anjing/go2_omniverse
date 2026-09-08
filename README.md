@@ -28,30 +28,24 @@ export CONDA_ENV_NAME=env_isaaclab
 
 ## 启动仿真
 
-推荐使用 ROS2 控制、单目 RGB、深度和 labeled Hospital 场景：
+运行时固定使用 MoE-CTS 和单个 `front_cam`。推荐使用 ROS2 控制、RGB-D 和 labeled Hospital 场景：
 
 ```bash
 cd /media/user/data1/carl/workspace/go2_omniverse
-CMD_SOURCE=ros2 CAMERA_MODE=single ENABLE_DEPTH=true \
+CMD_SOURCE=ros2 \
 CUSTOM_ENV=hospital ./scripts/run_sim.sh
 ```
 
 headless 模式：
 
 ```bash
-HEADLESS=1 CMD_SOURCE=ros2 ENABLE_DEPTH=true \
+HEADLESS=1 CMD_SOURCE=ros2 \
 CUSTOM_ENV=hospital ./scripts/run_sim.sh
 ```
 
-部署模型可切换：
-
-```bash
-DEPLOY_ARCHITECTURE=cts ./scripts/run_sim.sh
-DEPLOY_ARCHITECTURE=moe_cts ./scripts/run_sim.sh
-```
-
-默认参数包括 `CUSTOM_ENV=hospital`、`CMD_SOURCE=ros2`、`ENABLE_DEPTH=true`、
-`CAMERA_MODE=single`。启动时会打印实际场景、传感器与 checkpoint 配置。
+默认参数包括 `CUSTOM_ENV=hospital`、`CMD_SOURCE=ros2`，
+`EXPERIMENT_NAME=unitree_go2_fullscene_moe_cts`。启动时会打印实际场景、传感器与
+checkpoint 配置。模型架构和相机数量不再提供运行时切换接口。
 
 ## Big scene 资产
 
@@ -98,18 +92,6 @@ python tools/usd_scene_pipeline.py navigation-overlay \
 覆盖所有子项，也不能用 traversability、depth、normal 或 morphology 后处理掩盖源头
 语义错误。
 
-出现楼梯为 background 或栏杆为可通行区域时，排查顺序是：
-
-1. 确认运行时加载的 USD 路径和 composed runtime stage；
-2. 检查楼梯 rendered Mesh 的 semantic type/data；
-3. 检查 semantic annotator 的 raw ID 与 `idToLabels`；
-4. 核对消费端是否按 raw label 映射语义类别。
-
-Hospital 的 `Geo_Roof_Costum1_34`、`Geo_Roof_Costum6_19` 楼板同时包含二层支撑面和
-一层天花板。离线生成工具将其顶面提取为同级 `*_SupportSurface` Mesh，标为 `floor`；
-原 Mesh 的底面和侧面标为 `wall`。分类限定于这两块已审核楼板，并核对顶面高度和朝向。
-静态几何和标签检查通过不等于运行时图像已验证，仍需检查实际 annotator 输出。
-
 ## ROS2 话题
 
 控制输入：
@@ -131,8 +113,33 @@ Hospital 的 `Geo_Roof_Costum1_34`、`Geo_Roof_Costum6_19` 楼板同时包含二
 /robot0/front_cam/semantic_segmentation_labels
 ```
 
-双目模式 (`CAMERA_MODE=double`) 额外发布 `/robot0/front_cam_left/*` 和
-`/robot0/front_cam_right/*`。Depth 话题仅在 `ENABLE_DEPTH=true` 时可用。
+`front_cam/depth` 始终发布，不提供关闭开关。
+
+## Front camera extrinsic
+
+`front_cam` 的外参定义为从 robot base frame 到 camera frame 的齐次变换
+`T_base_front_cam`：
+
+```text
+T_base_front_cam =[ [ R_base_front_cam  t_base_front_cam ],
+                    [       0 0 0               1        ] ]
+
+                   [ [ 0   0   1    0.32487],
+                  =  [-1   0   0   -0.00095],
+                     [0  -1   0     0.05362],
+                     [0   0   0    1]         ]
+```
+
+其中平移单位为米。默认矩阵同时用于 IsaacLab `CameraCfg` 和 ROS2
+`base_link -> front_cam` static TF，因此不会再出现渲染相机外参与 TF 分别修改后不一致的问题。
+
+可以通过一行 16 个 row-major 数值覆盖外参：
+
+```bash
+export FRONT_CAM_EXTRINSIC="0 0 1 0.32487 -1 0 0 -0.00095 0 -1 0 0.05362 0 0 0 1"
+./scripts/run_sim.sh
+```
+
 
 键盘控制示例：
 
@@ -143,11 +150,19 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard \
 
 ## 训练与部署
 
-楼梯/全场景 CTS 训练：
+MoE-CTS 楼梯/全场景强化学习训练：
 
 ```bash
 ./scripts/run_train_stairs.sh
-ARCHITECTURE=moe_cts ./scripts/run_train_stairs.sh
 ```
 
-训练参数和 checkpoint 路径见 `scripts/run_train_stairs.sh`、`scripts/run_sim.sh`。
+训练固定使用 `ActorCriticMoECTS + MoECTS`。可以用 `CHECKPOINT` 继续训练，也可以用
+`EXPERIMENT_NAME` 修改日志目录；这两个参数只选择权重和运行记录，不切换模型结构：
+
+```bash
+CHECKPOINT=logs/rsl_rl/unitree_go2_fullscene_moe_cts/seed_123/model_14000.pt \
+  ./scripts/run_train_stairs.sh
+```
+
+部署默认读取 `logs/rsl_rl/unitree_go2_fullscene_moe_cts/`，可通过 `LOAD_RUN` 和
+`CHECKPOINT` 选择该架构下的 checkpoint。非 MoE-CTS checkpoint 会在加载阶段被拒绝。

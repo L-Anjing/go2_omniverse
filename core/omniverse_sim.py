@@ -82,7 +82,6 @@ parser.add_argument(
 parser.add_argument(
     "--custom_env", type=str, default="", help="Setup the environment"
 )
-parser.add_argument("--robot", type=str, default="go2", help="Setup the robot")
 parser.add_argument(
     "--robot_amount", type=int, default=1, help="Setup the robot amount"
 )
@@ -96,46 +95,6 @@ parser.add_argument(
         "'keyboard' for manual teleop, 'ros2' for /robot{N}/cmd_vel subscribers."
     ),
 )
-parser.add_argument(
-    "--viewer_follow",
-    type=str,
-    choices=("auto", "on", "off"),
-    default="auto",
-    help=(
-        "Viewer tracking mode for the main camera. "
-        "'auto' keeps the previous behavior (follow only for single-robot play), "
-        "'on' always follows the robot root, and 'off' leaves the viewer free."
-    ),
-)
-parser.add_argument(
-    "--deploy_architecture",
-    type=str,
-    choices=("cts", "moe_cts"),
-    default="cts",
-    help=(
-        "Preferred Go2 deployment family. "
-        "'cts' defaults to the standard CTS experiment folder; "
-        "'moe_cts' defaults to the reference-style MoE-CTS folder."
-    ),
-)
-parser.add_argument(
-    "--camera_mode",
-    type=str,
-    choices=("single", "double"),
-    default="single",
-    help=(
-        "Camera configuration: 'single' uses one front_cam, "
-        "'double' uses a stereo pair (front_cam_left / front_cam_right)."
-    ),
-)
-parser.add_argument(
-    "--enable_depth",
-    action="store_true",
-    default=False,
-    help="Publish depth images alongside RGB (default: False).",
-)
-
-
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 
@@ -143,6 +102,7 @@ cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+args_cli.robot = "go2"
 
 
 # launch omniverse app
@@ -180,14 +140,10 @@ import isaaclab.sim as sim_utils
 import isaaclab.terrains as terrain_gen
 import omni.appwindow
 from isaaclab.terrains import TerrainGeneratorCfg, TerrainImporterCfg
-from rsl_rl.runners import OnPolicyRunner
-
-
 import rclpy
 from core.ros2 import (
     RobotBaseNode,
     add_camera,
-    add_copter_camera,
     add_rtx_lidar,
     pub_robo_data_ros2
 )
@@ -195,17 +151,14 @@ from geometry_msgs.msg import Twist
 from std_srvs.srv import Trigger
 
 
-from configs.agent_cfg import unitree_go2_agent_cfg, unitree_g1_agent_cfg
+from configs.agent_cfg import unitree_go2_agent_cfg
 from configs.custom_rl_env import (
-    UnitreeGo2CustomEnvCfg,
     Go2StairDeployCfg,
     Go2FullSceneDeployCfg,
-    G1RoughEnvCfg,
     GO2_MODEL_JOINT_NAMES,
 )
 import configs.custom_rl_env as custom_rl_env
 
-from assets.robots.copter.config import CRAZYFLIE_CFG
 from isaaclab.assets import Articulation, AssetBaseCfg
 from isaaclab.envs import mdp
 from isaaclab.managers import SceneEntityCfg
@@ -960,9 +913,7 @@ def _reset_root_state_spatially_valid(
 
 
 def _default_go2_deploy_experiment_name() -> str:
-    if args_cli.deploy_architecture == "moe_cts":
-        return "unitree_go2_fullscene_moe_cts"
-    return "unitree_go2_fullscene_cts"
+    return "unitree_go2_fullscene_moe_cts"
 
 
 def resolve_agent_cfg(base_cfg: RslRlOnPolicyRunnerCfg) -> RslRlOnPolicyRunnerCfg:
@@ -1008,12 +959,6 @@ def configure_policy_from_checkpoint(
     agent_cfg["policy"] = policy_cfg
 
 
-def _is_cts_checkpoint(path: str) -> bool:
-    """Return True if the checkpoint was produced by CTSRunner."""
-    ckpt = torch.load(path, map_location="cpu")
-    return any(k.startswith("teacher_encoder") for k in ckpt.get("model_state_dict", {}))
-
-
 def _infer_hidden_dims_from_mlp(state_dict: dict[str, torch.Tensor], prefix: str) -> list[int]:
     weights = sorted(k for k in state_dict if k.startswith(prefix) and k.endswith(".weight"))
     if len(weights) < 2:
@@ -1039,36 +984,28 @@ def _infer_cts_checkpoint_dims(checkpoint_path: str, map_location: str = "cpu") 
     actor_hidden_dims = _infer_hidden_dims_from_mlp(state_dict, "actor.")
     critic_hidden_dims = _infer_hidden_dims_from_mlp(state_dict, "critic.")
 
-    if any(k.startswith("student_moe_encoder.") for k in state_dict):
-        checkpoint_kind = "moe_cts"
-        teacher_hidden_dims = _infer_hidden_dims_from_mlp(state_dict, "teacher_encoder.0.")
-        gating_w = sorted(
-            k
-            for k in state_dict
-            if k.startswith("student_moe_encoder.moe.gating_network.0.network.")
-            and k.endswith(".weight")
-        )
-        backbone_w = sorted(
-            k
-            for k in state_dict
-            if k.startswith("student_moe_encoder.moe.experts.backbone.network.")
-            and k.endswith(".weight")
-        )
-        if not gating_w or not backbone_w:
-            raise RuntimeError("Unsupported MoE-CTS checkpoint layout.")
-        expert_num = state_dict[gating_w[-1]].shape[0]
-        history_length = state_dict[backbone_w[0]].shape[1] // num_actor_obs
-        expert_hidden_dim = state_dict[backbone_w[-1]].shape[0] // expert_num
-        student_hidden_dims = [*([state_dict[key].shape[0] for key in gating_w[:-1]]), expert_hidden_dim]
-    else:
-        checkpoint_kind = "cts"
-        teacher_hidden_dims = _infer_hidden_dims_from_mlp(state_dict, "teacher_encoder.")
-        stu_w = sorted(k for k in state_dict if k.startswith("student_encoder.") and k.endswith(".weight"))
-        if not stu_w:
-            raise RuntimeError("Unsupported CTS checkpoint layout.")
-        history_length = state_dict[stu_w[0]].shape[1] // num_actor_obs
-        student_hidden_dims = _infer_hidden_dims_from_mlp(state_dict, "student_encoder.")
-        expert_num = 0
+    if not any(k.startswith("student_moe_encoder.") for k in state_dict):
+        raise RuntimeError("Only MoE-CTS checkpoints are supported.")
+    checkpoint_kind = "moe_cts"
+    teacher_hidden_dims = _infer_hidden_dims_from_mlp(state_dict, "teacher_encoder.0.")
+    gating_w = sorted(
+        k
+        for k in state_dict
+        if k.startswith("student_moe_encoder.moe.gating_network.0.network.")
+        and k.endswith(".weight")
+    )
+    backbone_w = sorted(
+        k
+        for k in state_dict
+        if k.startswith("student_moe_encoder.moe.experts.backbone.network.")
+        and k.endswith(".weight")
+    )
+    if not gating_w or not backbone_w:
+        raise RuntimeError("Unsupported MoE-CTS checkpoint layout.")
+    expert_num = state_dict[gating_w[-1]].shape[0]
+    history_length = state_dict[backbone_w[0]].shape[1] // num_actor_obs
+    expert_hidden_dim = state_dict[backbone_w[-1]].shape[0] // expert_num
+    student_hidden_dims = [*([state_dict[key].shape[0] for key in gating_w[:-1]]), expert_hidden_dim]
 
     return {
         "checkpoint_kind": checkpoint_kind,
@@ -1096,7 +1033,7 @@ def load_cts_policy(checkpoint_path: str, env, device: str):
       - num_actions  : actor last-layer output
       - history_length: student encoder first-layer input / num_actor_obs
     """
-    from rsl_rl_cts import ActorCriticCTS, ActorCriticMoECTS
+    from rsl_rl_cts import ActorCriticMoECTS
 
     ckpt = torch.load(checkpoint_path, map_location=device)
     state_dict = ckpt["model_state_dict"]
@@ -1121,33 +1058,19 @@ def load_cts_policy(checkpoint_path: str, env, device: str):
             f"the training env cfg (height_scanner size, observation terms, etc.)."
         )
 
-    if checkpoint_kind == "moe_cts":
-        model = ActorCriticMoECTS(
-            num_obs=num_actor_obs,
-            num_critic_obs=num_critic_obs,
-            num_actions=num_actions,
-            num_envs=env.num_envs,
-            history_length=history_length,
-            actor_hidden_dims=dims["actor_hidden_dims"],
-            critic_hidden_dims=dims["critic_hidden_dims"],
-            teacher_encoder_hidden_dims=dims["teacher_encoder_hidden_dims"],
-            student_encoder_hidden_dims=dims["student_encoder_hidden_dims"],
-            expert_num=dims["expert_num"],
-            latent_dim=latent_dim,
-        ).to(device)
-    else:
-        model = ActorCriticCTS(
-            num_actor_obs=num_actor_obs,
-            num_critic_obs=num_critic_obs,
-            num_actions=num_actions,
-            num_envs=env.num_envs,
-            history_length=history_length,
-            actor_hidden_dims=dims["actor_hidden_dims"],
-            critic_hidden_dims=dims["critic_hidden_dims"],
-            teacher_encoder_hidden_dims=dims["teacher_encoder_hidden_dims"],
-            student_encoder_hidden_dims=dims["student_encoder_hidden_dims"],
-            latent_dim=latent_dim,
-        ).to(device)
+    model = ActorCriticMoECTS(
+        num_obs=num_actor_obs,
+        num_critic_obs=num_critic_obs,
+        num_actions=num_actions,
+        num_envs=env.num_envs,
+        history_length=history_length,
+        actor_hidden_dims=dims["actor_hidden_dims"],
+        critic_hidden_dims=dims["critic_hidden_dims"],
+        teacher_encoder_hidden_dims=dims["teacher_encoder_hidden_dims"],
+        student_encoder_hidden_dims=dims["student_encoder_hidden_dims"],
+        expert_num=dims["expert_num"],
+        latent_dim=latent_dim,
+    ).to(device)
     model.load_state_dict(state_dict)
     model.eval()
     print(f"[CTS] Loaded checkpoint from: {checkpoint_path}")
@@ -1176,14 +1099,6 @@ def resolve_checkpoint_path(
 # narrowed at runtime to match their actual training command envelope.
 CMD_LIN_VEL = 1.5   # forward / backward / strafe speed  [m/s]
 CMD_ANG_VEL = 1.5   # yaw rotation speed                 [rad/s]
-
-
-def _viewer_should_follow() -> bool:
-    if args_cli.viewer_follow == "on":
-        return True
-    if args_cli.viewer_follow == "off":
-        return False
-    return args_cli.robot_amount == 1
 
 
 def _base_command_tensor(num_envs: int, device: torch.device | str) -> torch.Tensor:
@@ -2087,13 +2002,10 @@ def run_sim():
 
     """Run deploy-time inference with an RSL-RL checkpoint."""
     # ── Resolve agent cfg and checkpoint path FIRST ───────────────────────────
-    # We must know the checkpoint type before calling gym.make() because
-    # CTS-family checkpoints use dedicated deploy envs whose actor observation
-    # size can differ from the default PPO play env (for example 45D
-    # stair-student or 48D full-scene student).
+    # The checkpoint dimensions determine which MoE-CTS observation layout is used.
     agent_cfg: RslRlOnPolicyRunnerCfg = resolve_agent_cfg(unitree_go2_agent_cfg)
-    if args_cli.robot == "g1":
-        agent_cfg = resolve_agent_cfg(unitree_g1_agent_cfg)
+    if args_cli.robot != "go2":
+        raise ValueError("MoE-CTS deployment supports only the Go2 robot")
 
     log_root_path = os.path.abspath(
         os.path.join("logs", "rsl_rl", agent_cfg["experiment_name"]))
@@ -2102,75 +2014,41 @@ def run_sim():
         log_root_path, agent_cfg["load_run"], agent_cfg["load_checkpoint"])
     configure_policy_from_checkpoint(agent_cfg, resume_path)
     print(
-        "[INFO] Resolved agent config: "
-        f"deploy_architecture={args_cli.deploy_architecture}, "
+        "[INFO] Resolved MoE-CTS agent config: "
         f"experiment={agent_cfg['experiment_name']}, "
         f"checkpoint={agent_cfg['load_checkpoint']}, "
         f"noise_std_type={agent_cfg['policy'].get('noise_std_type', 'default')}"
     )
 
     # ── Choose env cfg to match the checkpoint's observation space ────────────
-    _cts = _is_cts_checkpoint(resume_path)
-    _cts_dims = _infer_cts_checkpoint_dims(resume_path) if _cts else None
-    if _cts and args_cli.robot == "go2":
-        actual_arch = _cts_dims["checkpoint_kind"]
-        if actual_arch != args_cli.deploy_architecture:
-            print(
-                "[WARN] Requested deploy architecture "
-                f"'{args_cli.deploy_architecture}' but checkpoint is '{actual_arch}'. "
-                "Proceeding with the checkpoint's actual structure."
-            )
-    if args_cli.robot == "g1":
-        env_cfg = G1RoughEnvCfg()
-    elif _cts:
-        actor_obs_dim = _cts_dims["num_actor_obs"]
-        checkpoint_label = "MoE-CTS" if _cts_dims["checkpoint_kind"] == "moe_cts" else "CTS"
-        if actor_obs_dim == 45:
-            env_cfg = Go2StairDeployCfg()
-            print(f"[INFO] {checkpoint_label} checkpoint detected — using Go2StairDeployCfg (45D student obs)")
-        elif actor_obs_dim == 48:
-            env_cfg = Go2FullSceneDeployCfg()
-            print(f"[INFO] {checkpoint_label} checkpoint detected — using Go2FullSceneDeployCfg (48D velocity-aware student obs)")
-        else:
-            raise RuntimeError(
-                f"Unsupported CTS-family actor observation size {actor_obs_dim}. "
-                "Add a matching deploy env cfg before running this checkpoint."
-            )
+    _cts_dims = _infer_cts_checkpoint_dims(resume_path)
+    actor_obs_dim = _cts_dims["num_actor_obs"]
+    if actor_obs_dim == 45:
+        env_cfg = Go2StairDeployCfg()
+        print("[INFO] MoE-CTS checkpoint detected — using Go2StairDeployCfg (45D student obs)")
+    elif actor_obs_dim == 48:
+        env_cfg = Go2FullSceneDeployCfg()
+        print("[INFO] MoE-CTS checkpoint detected — using Go2FullSceneDeployCfg (48D velocity-aware student obs)")
     else:
-        env_cfg = UnitreeGo2CustomEnvCfg()
+        raise RuntimeError(
+            f"Unsupported MoE-CTS actor observation size {actor_obs_dim}. "
+            "Add a matching deploy environment configuration first."
+        )
 
     _apply_procedural_terrain_from_env(env_cfg)
     _apply_random_start_from_env(env_cfg)
 
     global CMD_LIN_VEL, CMD_ANG_VEL
-    if _cts and args_cli.robot != "g1":
-        actor_obs_dim = _cts_dims["num_actor_obs"]
-        if actor_obs_dim == 45:
-            CMD_LIN_VEL = 1.0
-            CMD_ANG_VEL = 1.5
-            print(
-                "[INFO] 45D stair deploy command limits enabled: "
-                f"lin={CMD_LIN_VEL:.1f} m/s, yaw={CMD_ANG_VEL:.1f} rad/s"
-            )
-        elif actor_obs_dim == 48:
-            CMD_LIN_VEL = 1.0
-            CMD_ANG_VEL = 1.0
-            print(
-                "[INFO] 48D full-scene deploy command limits enabled: "
-                f"lin={CMD_LIN_VEL:.1f} m/s, yaw={CMD_ANG_VEL:.1f} rad/s"
-            )
-
-    # Use a robot-following camera for single-robot play so visibility is not
-    # dominated by the hospital/world origin framing.
-    if _viewer_should_follow():
-        env_cfg.viewer.origin_type = "asset_root"
-        env_cfg.viewer.asset_name = "robot"
-        env_cfg.viewer.env_index = 0
-        env_cfg.viewer.eye = (2.8, 2.8, 1.6)
-        env_cfg.viewer.lookat = (0.0, 0.0, 0.45)
-        print("[INFO] Viewer set to follow robot root")
+    if actor_obs_dim == 45:
+        CMD_LIN_VEL = 1.0
+        CMD_ANG_VEL = 1.5
     else:
-        print("[INFO] Viewer follow disabled; using free camera")
+        CMD_LIN_VEL = 1.0
+        CMD_ANG_VEL = 1.0
+    print(
+        f"[INFO] {actor_obs_dim}D MoE-CTS command limits enabled: "
+        f"lin={CMD_LIN_VEL:.1f} m/s, yaw={CMD_ANG_VEL:.1f} rad/s"
+    )
 
     # add N robots to env
     env_cfg.scene.num_envs = args_cli.robot_amount
@@ -2261,20 +2139,14 @@ def run_sim():
         _label_ground_subtree(semantic_stage, "/World/ground", "floor")
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env)
-    if args_cli.robot == "go2" and _cts:
-        robot = env.unwrapped.scene["robot"]
-        ordered_ids, ordered_names = robot.find_joints(GO2_MODEL_JOINT_NAMES, preserve_order=True)
-        print(f"[INFO] Go2 asset joint order: {robot.joint_names}")
-        print(f"[INFO] Go2 deploy joint order: {ordered_names} {ordered_ids}")
+    robot = env.unwrapped.scene["robot"]
+    ordered_ids, ordered_names = robot.find_joints(GO2_MODEL_JOINT_NAMES, preserve_order=True)
+    print(f"[INFO] Go2 asset joint order: {robot.joint_names}")
+    print(f"[INFO] Go2 deploy joint order: {ordered_names} {ordered_ids}")
 
     # ── Load policy ───────────────────────────────────────────────────────────
     _device = agent_cfg["device"]
-    if _cts:
-        policy = load_cts_policy(resume_path, env, _device)
-    else:
-        ppo_runner = OnPolicyRunner(env, agent_cfg, log_dir=None, device=_device)
-        ppo_runner.load(resume_path)
-        policy = ppo_runner.get_inference_policy(device=env.unwrapped.device)
+    policy = load_cts_policy(resume_path, env, _device)
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
 
     # initialize ROS2 node
@@ -2293,16 +2165,11 @@ def run_sim():
     UnitreeL1_annotator_lst = add_rtx_lidar(env_cfg.scene.num_envs, args_cli.robot, "UnitreeL1", False)
     ExtraLidar_annotator_lst = add_rtx_lidar(env_cfg.scene.num_envs, args_cli.robot, "Extra", False)
     annotator_lst = UnitreeL1_annotator_lst + ExtraLidar_annotator_lst
-    add_camera(env_cfg.scene.num_envs, args_cli.robot, camera_mode=args_cli.camera_mode)
-    # add_copter_camera()
+    add_camera(env_cfg.scene.num_envs)
 
     # create ros2 camera stream omnigraph (rgb + depth + semantic_segmentation)
     for i in range(env_cfg.scene.num_envs):
-        create_front_cam_omnigraph(
-            i,
-            camera_mode=args_cli.camera_mode,
-            enable_depth=args_cli.enable_depth,
-        )
+        create_front_cam_omnigraph(i)
 
     # First observation collection — triggers the first policy-driven step.
     # Everything above must be fully on stage before this call.

@@ -18,22 +18,9 @@ from pathlib import Path
 import torch
 from torch.utils.tensorboard import SummaryWriter
 
-from .actor_critic_cts import ActorCriticCTS
 from .actor_critic_moe_cts import ActorCriticMoECTS
-from .cts_algorithm import CTS
 from .moe_cts_algorithm import MoECTS
 from .rollout_storage_cts import RolloutStorageCTS
-
-POLICY_CLASS_MAP = {
-    "ActorCriticCTS": ActorCriticCTS,
-    "ActorCriticMoECTS": ActorCriticMoECTS,
-}
-
-ALGORITHM_CLASS_MAP = {
-    "CTS": CTS,
-    "MoECTS": MoECTS,
-}
-
 
 class CTSRunner:
     """On-policy CTS runner for IsaacLab environments."""
@@ -53,10 +40,12 @@ class CTSRunner:
         runner_cfg = train_cfg.get("runner", {})
         policy_cfg = train_cfg["policy"]
         alg_cfg = train_cfg["algorithm"]
-        policy_class_name = runner_cfg.get("policy_class_name", "ActorCriticCTS")
-        algorithm_class_name = runner_cfg.get("algorithm_class_name", "CTS")
-        policy_class = POLICY_CLASS_MAP[policy_class_name]
-        algorithm_class = ALGORITHM_CLASS_MAP[algorithm_class_name]
+        policy_class_name = runner_cfg.get("policy_class_name", "ActorCriticMoECTS")
+        algorithm_class_name = runner_cfg.get("algorithm_class_name", "MoECTS")
+        if policy_class_name != "ActorCriticMoECTS" or algorithm_class_name != "MoECTS":
+            raise ValueError("CTSRunner supports only ActorCriticMoECTS + MoECTS")
+        policy_class = ActorCriticMoECTS
+        algorithm_class = MoECTS
         self.history_length       = train_cfg.get("history_length", 5)
         self.num_steps_per_env    = runner_cfg.get("num_steps_per_env", train_cfg.get("num_steps_per_env", 48))
         self.save_interval        = runner_cfg.get("save_interval", train_cfg.get("save_interval", 200))
