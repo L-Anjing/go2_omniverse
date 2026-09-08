@@ -39,16 +39,22 @@ from isaaclab.app import AppLauncher
 from core import cli_args
 from core.semantic_labels import (
     canonical_semantic_class,
+    direct_door_semantic_class,
+    direct_navigation_semantic_class,
+    direct_railing_semantic_class,
     infer_semantic_class,
     is_traversal_surface_class,
 )
 from core.spatial_geometry import (
+    constrain_xy_bounds,
+    filter_points_hidden_below_traversal,
     find_traversal_entry_spawn_points,
     has_body_clearance_from_obstacles,
     is_walkable_triangle,
 )
 import time
 import os
+import signal
 import threading
 
 
@@ -630,11 +636,38 @@ def _build_valid_spawn_points() -> list[tuple[float, float, float]]:
         return _VALID_SPAWN_POINTS
     if _CUSTOM_SCENE_BOUNDS is None:
         return []
-    x_min, x_max, y_min, y_max = _CUSTOM_SCENE_BOUNDS
     margin = _spatial_float_env("SPATIAL_BOUNDS_MARGIN", 0.75)
     resolution = max(_spatial_float_env("SPATIAL_GRID_RESOLUTION", 0.75), 0.25)
-    x_min, x_max = x_min + margin, x_max - margin
-    y_min, y_max = y_min + margin, y_max - margin
+    # Explicit fixed spawns are already collision-checked below and may
+    # intentionally sit outside the profile's generic random-start box (for
+    # example, the audited hospital stair landing). Keep the full navigation
+    # map for those profiles so the fixed points remain connected to routes.
+    has_fixed_spawns = bool(
+        os.environ.get("SPATIAL_FIXED_SPAWN_POINTS", "").strip()
+    )
+    try:
+        x_min, x_max, y_min, y_max = constrain_xy_bounds(
+            _CUSTOM_SCENE_BOUNDS,
+            margin=margin,
+            x_range=(
+                None
+                if has_fixed_spawns
+                else _parse_range_env("RANDOM_START_X_RANGE")
+            ),
+            y_range=(
+                None
+                if has_fixed_spawns
+                else _parse_range_env("RANDOM_START_Y_RANGE")
+            ),
+        )
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
+    _SPATIAL_MAP_METADATA["configured_start_xy_bounds"] = [
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+    ]
     max_candidates = 2500
     nx = max(int((x_max - x_min) / resolution) + 1, 1)
     ny = max(int((y_max - y_min) / resolution) + 1, 1)
@@ -660,6 +693,23 @@ def _build_valid_spawn_points() -> list[tuple[float, float, float]]:
             y += resolution
         x += resolution
     traversal_points = _build_traversal_points()
+    under_traversal_rejected_count = 0
+    under_traversal_radius = _spatial_float_env(
+        "SPATIAL_UNDER_TRAVERSAL_EXCLUSION_RADIUS", 0.0
+    )
+    if under_traversal_radius > 0.0 and points and traversal_points:
+        points, under_traversal_rejected_count = (
+            filter_points_hidden_below_traversal(
+                points,
+                traversal_points,
+                exclusion_radius_m=under_traversal_radius,
+            )
+        )
+        print(
+            "[INFO] Under-traversal floor filter: removed "
+            f"{under_traversal_rejected_count} hidden floor points "
+            f"(radius={under_traversal_radius:.2f}m)"
+        )
     fallback_z_raw = os.environ.get("SPATIAL_FALLBACK_FLOOR_Z", "").strip()
     if len(points) < 16 and fallback_z_raw:
         if points:
@@ -751,6 +801,7 @@ def _build_valid_spawn_points() -> list[tuple[float, float, float]]:
             "candidate_count": candidate_count,
             "floor_supported_count": floor_supported_count,
             "clearance_rejected_count": clearance_rejected_count,
+            "under_traversal_rejected_count": under_traversal_rejected_count,
             "valid_candidate_fraction": (
                 len(points) / candidate_count if candidate_count else 0.0
             ),
@@ -1180,48 +1231,6 @@ def sub_keyboard_event(event, *args, **kwargs) -> bool:
     return True
 
 
-def move_copter(copter):
-
-    # TODO tmp solution for test
-    if custom_rl_env.base_command["0"] == [0, 0, 0]:
-        copter_move_cmd = torch.tensor(
-            [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]], device="cuda:0"
-        )
-
-    if custom_rl_env.base_command["0"] == [1, 0, 0]:
-        copter_move_cmd = torch.tensor(
-            [[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]], device="cuda:0"
-        )
-
-    if custom_rl_env.base_command["0"] == [-1, 0, 0]:
-        copter_move_cmd = torch.tensor(
-            [[-1.0, 0.0, 0.0, 0.0, 0.0, 0.0]], device="cuda:0"
-        )
-
-    if custom_rl_env.base_command["0"] == [0, 1, 0]:
-        copter_move_cmd = torch.tensor(
-            [[0.0, 1.0, 0.0, 0.0, 0.0, 0.0]], device="cuda:0"
-        )
-
-    if custom_rl_env.base_command["0"] == [0, -1, 0]:
-        copter_move_cmd = torch.tensor(
-            [[0.0, -1.0, 0.0, 0.0, 0.0, 0.0]], device="cuda:0"
-        )
-
-    if custom_rl_env.base_command["0"] == [0, 0, 1]:
-        copter_move_cmd = torch.tensor(
-            [[0.0, 0.0, 1.0, 0.0, 0.0, 0.0]], device="cuda:0"
-        )
-
-    if custom_rl_env.base_command["0"] == [0, 0, -1]:
-        copter_move_cmd = torch.tensor(
-            [[0.0, 0.0, -1.0, 0.0, 0.0, 0.0]], device="cuda:0"
-        )
-
-    copter.write_root_velocity_to_sim(copter_move_cmd)
-    copter.write_data_to_sim()
-
-
 def setup_custom_env():
     """Load a custom visual environment USD into the stage.
 
@@ -1244,19 +1253,16 @@ def setup_custom_env():
     """
     try:
         if args_cli.custom_env == "office":
-            cfg_scene = sim_utils.UsdFileCfg(usd_path=str(REPO_ROOT / "assets" / "env" / "office.usd"))
+            cfg_scene = sim_utils.UsdFileCfg(
+                usd_path=str(REPO_ROOT / "assets" / "env" / "big_scene" / "office" / "office_navigation.usda")
+            )
             cfg_scene.func("/World/office", cfg_scene, translation=(0.0, 0.0, 0.0))
 
         if args_cli.custom_env == "hospital":
-            # Absolute path to the hospital asset bundle.
-            # Materials/ and Props/ are referenced as relative layers inside
-            # hospital.usd and are resolved automatically by the USD runtime.
-            _assets_root = os.environ.get(
-                "ISAAC_ASSETS_ROOT",
-                "/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5",
-            )
-            HOSPITAL_USD = os.path.join(
-                _assets_root, "Isaac/Environments/Hospital/hospital.usd"
+            # Backward-compatible manual launch: use the labeled open-door
+            # overlay so manual runs match the Data_collection pipeline.
+            HOSPITAL_USD = str(
+                REPO_ROOT / "assets" / "env" / "big_scene" / "hospital" / "hospital_navigation.usda"
             )
             cfg_scene = sim_utils.UsdFileCfg(usd_path=HOSPITAL_USD)
             cfg_scene.func("/World/hospital", cfg_scene, translation=(0.0, 0.0, 0.0))
@@ -1343,6 +1349,19 @@ def _spawn_hospital_usd(prim_path: str, cfg, translation=None, orientation=None)
     prim = spawn_from_usd(prim_path, cfg, translation=translation, orientation=orientation)
     stage = omni.usd.get_context().get_stage()
     repaired_labels = _reconcile_navigation_semantics(stage, prim_path)
+    navigation_labels = _label_named_navigation_geometry(stage, prim_path)
+    railing_labels = _label_named_railing_geometry(stage, prim_path)
+    if navigation_labels.get("floor", 0) == 0:
+        raise RuntimeError(
+            "Hospital USD exposes no directly labeled renderable floor prims; "
+            "refusing to start semantic collection"
+        )
+    stair_obstacle_labels = _count_stair_obstacle_labels(stage, prim_path)
+    if stair_obstacle_labels == 0:
+        raise RuntimeError(
+            "Hospital stair geometry exposes no direct wall/railing labels; "
+            "refusing to start semantic collection"
+        )
     annotation_count = _count_semantic_annotations(stage, prim_path)
     if annotation_count == 0:
         raise RuntimeError(f"Labeled hospital USD has no semantic annotations: {cfg.usd_path}")
@@ -1354,7 +1373,10 @@ def _spawn_hospital_usd(prim_path: str, cfg, translation=None, orientation=None)
         print(
             f"[INFO] Hospital spawned with {annotation_count} semantic annotations; "
             f"{num_planes} duplicate ground prim(s) deactivated; "
-            f"{repaired_labels} navigation label(s) reconciled"
+            f"{repaired_labels} navigation label(s) reconciled; "
+            f"direct navigation labels={navigation_labels}; "
+            f"direct railing labels={railing_labels}; "
+            f"stair obstacle labels={stair_obstacle_labels}"
         )
     return prim
 
@@ -1394,14 +1416,28 @@ def _has_direct_semantic_annotation(prim) -> bool:
 
 def _reconcile_navigation_semantics(stage, root_path: str) -> int:
     """Repair stale structural/walkable labels using leaf-first prim names."""
+    if os.environ.get("SEMANTIC_LABEL_MODE", "").strip() == "manual_labeled":
+        return 0
     root = stage.GetPrimAtPath(root_path)
     if not root or not root.IsValid():
         return 0
     repaired = 0
     walkable = {"floor", "ramp", "stairs"}
     for prim in Usd.PrimRange(root):
-        expected = infer_semantic_class(str(prim.GetPath()))
-        if expected == "misc":
+        path = str(prim.GetPath())
+        expected = direct_door_semantic_class(path)
+        if expected is None:
+            expected = direct_railing_semantic_class(path)
+        if expected is None:
+            expected = direct_navigation_semantic_class(path)
+        if expected is None:
+            continue
+        # Never restore a broad navigation class on an assembly Xform.  The
+        # navigation overlay deliberately blocks stair-root semantics so the
+        # rendered child meshes can distinguish tread from railing.  Rewriting
+        # ``Geo_M_Stairs*`` here made Replicator classify the whole assembly as
+        # stairs and overrode the child wall label at runtime.
+        if not prim.IsA(UsdGeom.Gprim):
             continue
         updated = False
         for attribute in prim.GetAttributes():
@@ -1424,6 +1460,78 @@ def _count_semantic_annotations(stage, root_path: str) -> int:
         for prim in Usd.PrimRange(root)
         if _has_direct_semantic_annotation(prim)
     )
+
+
+def _count_stair_obstacle_labels(stage, root_path: str) -> int:
+    """Count direct obstacle labels authored inside named stair assemblies."""
+    root = stage.GetPrimAtPath(root_path)
+    if not root or not root.IsValid():
+        return 0
+    count = 0
+    for prim in Usd.PrimRange(root):
+        if "stair" not in str(prim.GetPath()).lower():
+            continue
+        for attribute in prim.GetAttributes():
+            if "semanticdata" not in attribute.GetName().lower():
+                continue
+            if canonical_semantic_class(attribute.Get()) == "wall":
+                count += 1
+                break
+    return count
+
+
+def _label_named_navigation_geometry(stage, root_path: str) -> dict[str, int]:
+    """Author direct labels on renderable floor and transition prims.
+
+    The hospital asset has structural labels on broad ancestor prims.  A mesh
+    named ``Geo_Floor_*`` can therefore inherit ``structure`` even though name
+    inference correctly identifies it as a floor.  Reconciliation alone does
+    not fix that case because it only edits semantic attributes already
+    authored on the mesh.  Replicator resolves the rendered leaf prim, so put
+    the navigation label directly on each renderable leaf before annotators
+    are created.
+    """
+    root = stage.GetPrimAtPath(root_path)
+    if not root or not root.IsValid():
+        return {}
+    counts: dict[str, int] = {}
+    for candidate in Usd.PrimRange(root):
+        if not candidate.IsActive():
+            continue
+        if not candidate.IsA(UsdGeom.Gprim):
+            continue
+        if os.environ.get("SEMANTIC_LABEL_MODE", "").strip() == "manual_labeled":
+            # Count authored surfaces without rewriting audited source labels.
+            # S_WetFloorSign used to be overwritten as floor here after load.
+            value = candidate.GetAttribute("semantic:Semantics:params:semanticData").Get()
+            if value in {"floor", "stairs", "ramp"}:
+                counts[value] = counts.get(value, 0) + 1
+            continue
+        class_name = direct_navigation_semantic_class(str(candidate.GetPath()))
+        if class_name is None:
+            continue
+        if _set_semantic_class(candidate, class_name):
+            counts[class_name] = counts.get(class_name, 0) + 1
+    return counts
+
+
+def _label_named_railing_geometry(stage, root_path: str) -> dict[str, int]:
+    """Directly label rail/fence leaves so stair-parent labels cannot leak."""
+    root = stage.GetPrimAtPath(root_path)
+    if not root or not root.IsValid():
+        return {}
+    counts: dict[str, int] = {}
+    for candidate in Usd.PrimRange(root):
+        if not candidate.IsActive():
+            continue
+        if not candidate.IsA(UsdGeom.Gprim):
+            continue
+        class_name = direct_railing_semantic_class(str(candidate.GetPath()))
+        if class_name is None:
+            continue
+        if _set_semantic_class(candidate, class_name):
+            counts[class_name] = counts.get(class_name, 0) + 1
+    return counts
 
 
 def _label_unannotated_geometry(stage, root_path: str, profile_hint: str) -> dict[str, int]:
@@ -1460,9 +1568,23 @@ def _spawn_generic_usd(prim_path: str, cfg, translation=None, orientation=None):
 
     stage = omni.usd.get_context().get_stage()
     label_mode = os.environ.get("SEMANTIC_LABEL_MODE", "").strip()
+    if label_mode == "manual_labeled":
+        annotation_count = _count_semantic_annotations(stage, prim_path)
+        if annotation_count == 0:
+            raise RuntimeError(
+                f"Manual-labeled USD has no semantic annotations: {cfg.usd_path}"
+            )
+        _record_custom_scene_bounds(stage, prim_path)
+        _SPATIAL_MAP_METADATA = {"semantic_annotation_count": annotation_count}
+        print(
+            f"[INFO] Manual-labeled custom USD spawned at {prim_path}: "
+            f"annotations={annotation_count} asset={cfg.usd_path}"
+        )
+        return prim
     if label_mode != "runtime_auto":
         raise RuntimeError(
-            f"External USD profile must use SEMANTIC_LABEL_MODE=runtime_auto, got '{label_mode}'"
+            "External USD profile must use SEMANTIC_LABEL_MODE=manual_labeled "
+            f"or runtime_auto, got '{label_mode}'"
         )
     counts = _label_unannotated_geometry(
         stage,
@@ -1695,14 +1817,43 @@ def _spawn_procedural_layout(prim_path: str, cfg, translation=None, orientation=
 
 
 def _set_semantic_class(prim, class_name: str) -> bool:
-    """Attach one Replicator class label to a prim if it exists."""
+    """Attach one unambiguous Replicator class label to a prim."""
     if not prim or not prim.IsValid():
         return False
-    instance_name = f"class_{class_name.replace(' ', '_')}"
-    semantics = Semantics.SemanticsAPI.Apply(prim, instance_name)
+    # Use the same canonical API instance as the statically labeled assets.
+    # Creating class_floor/class_stairs beside an existing ``Semantics`` API
+    # gives Replicator multiple class values for one rendered prim and the ROS
+    # bridge can publish that conflict as background.
+    semantics = Semantics.SemanticsAPI.Apply(prim, "Semantics")
     semantics.CreateSemanticTypeAttr().Set("class")
     semantics.CreateSemanticDataAttr().Set(class_name)
     return True
+
+
+def _label_ground_subtree(stage, root_path: str, class_name: str) -> int:
+    """Apply a semantic class to every renderable prim under root_path.
+
+    Generated terrains put the actual mesh on child prims (e.g.
+    /World/ground/flat); the root prim itself is only an Xform.  Replicator
+    semantics are per-prim, so labelling just the root leaves the rendered
+    floor unlabeled (it then merges with structure/background, which makes
+    flat scenes look permanently "blocked" to semantic-band avoidance).
+    """
+    root = stage.GetPrimAtPath(root_path)
+    if not root or not root.IsValid():
+        print(f"[WARN] Cannot label ground: {root_path} missing")
+        return 0
+    count = 0
+    for prim in Usd.PrimRange(root):
+        if not prim.IsActive():
+            continue
+        if not (prim.IsA(UsdGeom.Gprim) or prim.IsA(UsdGeom.Mesh)):
+            continue
+        if _set_semantic_class(prim, class_name):
+            count += 1
+    if count:
+        print(f"[INFO] Semantic class applied: {root_path}/** -> {class_name} ({count} prims)")
+    return count
 
 
 def _configure_default_ground_for_custom_usd(stage) -> bool:
@@ -1861,8 +2012,18 @@ def add_cmd_sub(num_envs):
         )
         node_test.create_service(Trigger, f"robot{i}/reset_episode", _request_episode_reset)
     # Spin in a separate thread
-    thread = threading.Thread(target=rclpy.spin, args=(node_test,), daemon=True)
+    def _spin_until_shutdown():
+        try:
+            rclpy.spin(node_test)
+        except Exception:
+            # rclpy raises ExternalShutdownException when the main thread
+            # performs the orderly shutdown below.
+            if rclpy.ok():
+                raise
+
+    thread = threading.Thread(target=_spin_until_shutdown, daemon=True)
     thread.start()
+    return node_test, thread
 
 
 def specify_cmd_for_robots(numv_envs):
@@ -2034,7 +2195,9 @@ def run_sim():
         )
 
     elif args_cli.custom_env == "hospital":
-        expected_hospital = (REPO_ROOT / "assets" / "env" / "hospital_labeled.usd").resolve()
+        expected_hospital = (
+            REPO_ROOT / "assets" / "env" / "big_scene" / "hospital" / "hospital_navigation.usda"
+        ).resolve()
         requested_hospital = Path(custom_env_usd_path).resolve() if custom_env_usd_path else expected_hospital
         if requested_hospital != expected_hospital or not expected_hospital.is_file():
             raise RuntimeError(f"Hospital must use labeled asset: {expected_hospital}")
@@ -2049,7 +2212,9 @@ def run_sim():
     # Reuse the hospital loading path for warehouse: registering the USD as an
     # AssetBaseCfg makes IsaacLab compose the scene together with the robot.
     elif args_cli.custom_env == "warehouse":
-        expected_warehouse = (REPO_ROOT / "assets" / "env" / "full_warehouse_labeled.usd").resolve()
+        expected_warehouse = (
+            REPO_ROOT / "assets" / "env" / "big_scene" / "warehouse" / "warehouse_navigation.usda"
+        ).resolve()
         requested_warehouse = Path(custom_env_usd_path).resolve() if custom_env_usd_path else expected_warehouse
         if requested_warehouse != expected_warehouse or not expected_warehouse.is_file():
             raise RuntimeError(f"Warehouse must use labeled asset: {expected_warehouse}")
@@ -2086,11 +2251,14 @@ def run_sim():
 
     semantic_stage = omni.usd.get_context().get_stage()
     default_ground_hidden = _configure_default_ground_for_custom_usd(semantic_stage)
-    if (
-        not default_ground_hidden
-        and _set_semantic_class(semantic_stage.GetPrimAtPath("/World/ground"), "floor")
-    ):
-        print("[INFO] Semantic class applied: /World/ground -> floor")
+    if not default_ground_hidden:
+        # The generator/imported terrain renders its mesh under child prims
+        # (/World/ground/<name>); Replicator semantics are per-prim, so the
+        # label must be applied to every renderable descendant, not just the
+        # root. Otherwise the floor falls back to structure/background and the
+        # semantic band fractions on flat scenes drop below the obstacle
+        # threshold, triggering random avoidance turns (pendulum motion).
+        _label_ground_subtree(semantic_stage, "/World/ground", "floor")
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env)
     if args_cli.robot == "go2" and _cts:
@@ -2112,8 +2280,10 @@ def run_sim():
     # initialize ROS2 node
     rclpy.init()
     base_node = RobotBaseNode(env_cfg.scene.num_envs)
+    cmd_node = None
+    cmd_spin_thread = None
     if args_cli.cmd_source == "ros2":
-        add_cmd_sub(env_cfg.scene.num_envs)
+        cmd_node, cmd_spin_thread = add_cmd_sub(env_cfg.scene.num_envs)
         print("[INFO] Command source: ROS2 (/robot{i}/cmd_vel -> base_command)")
     else:
         print("[INFO] Command source: keyboard (W/S/A/D/Q/E)")
@@ -2159,7 +2329,20 @@ def run_sim():
     _dbg_step = 0
     _dbg_resets = 0
     _dbg_timeouts = 0
-    while simulation_app.is_running():
+    shutdown_requested = threading.Event()
+
+    def _request_orderly_shutdown(signum, _frame):
+        if not shutdown_requested.is_set():
+            print(
+                f"[INFO] Received signal {signum}; stopping Isaac cleanly",
+                flush=True,
+            )
+            shutdown_requested.set()
+
+    signal.signal(signal.SIGTERM, _request_orderly_shutdown)
+    signal.signal(signal.SIGINT, _request_orderly_shutdown)
+
+    while simulation_app.is_running() and not shutdown_requested.is_set():
         # run everything in inference mode
         with torch.inference_mode():
             if _EPISODE_RESET_REQUESTED.is_set():
@@ -2208,8 +2391,6 @@ def run_sim():
                 base_commands=custom_rl_env.base_command,
                 timestamp_seconds=omni.timeline.get_timeline_interface().get_current_time(),
             )
-            # move_copter(copter)
-
             # --- debug: print early root state so we can distinguish
             # physics-state corruption from render-only issues ---
             _dbg_step += 1
@@ -2263,4 +2444,17 @@ def run_sim():
                 #     print(f"[DBG step={_dbg_step}] actions={[round(v,4) for v in actions[0].tolist()]}")
                 #     print(f"[DBG step={_dbg_step}] obs={[round(v,4) for v in obs[0].tolist()]}")
 
+    # Keep ROS alive while the environment tears down its Replicator writers;
+    # shutting rclpy down first makes OmniGraph abort while publishing cameras.
     env.close()
+    for node in (cmd_node, base_node):
+        if node is not None:
+            try:
+                node.destroy_node()
+            except Exception:
+                pass
+    if rclpy.ok():
+        rclpy.shutdown()
+    if cmd_spin_thread is not None:
+        cmd_spin_thread.join(timeout=2.0)
+    simulation_app.close()

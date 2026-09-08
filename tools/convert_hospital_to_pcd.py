@@ -94,6 +94,17 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--min-z", type=float, default=None)
     parser.add_argument("--max-z", type=float, default=None)
+    parser.add_argument(
+        "--scale",
+        type=float,
+        default=1.0,
+        help="Scale world coordinates by this factor (in meters) before sampling. "
+        "Use 0.01 for USD assets whose world coordinates are centimeters.",
+    )
+    parser.add_argument("--min-x", type=float, default=None)
+    parser.add_argument("--max-x", type=float, default=None)
+    parser.add_argument("--min-y", type=float, default=None)
+    parser.add_argument("--max-y", type=float, default=None)
     return parser.parse_args()
 
 
@@ -298,6 +309,28 @@ def main() -> None:
         raise RuntimeError("No geometry found! Check paths and visibility.")
 
     triangles = np.vstack(triangle_chunks)
+    if args.scale != 1.0:
+        print(f"[INFO] Scaling world coordinates by {args.scale} (unit fix)...")
+        triangles = triangles * args.scale
+
+    xy_limits = {
+        "x": (args.min_x, args.max_x),
+        "y": (args.min_y, args.max_y),
+    }
+    for axis, (minimum, maximum) in xy_limits.items():
+        index = 0 if axis == "x" else 1
+        centroids = triangles[:, :, index].mean(axis=1)
+        mask = np.ones(len(triangles), dtype=bool)
+        if minimum is not None:
+            mask &= centroids >= minimum
+        if maximum is not None:
+            mask &= centroids <= maximum
+        if not mask.all():
+            kept = int(mask.sum())
+            print(f"[INFO] XY crop {axis} [{minimum if minimum is not None else '-inf'}, "
+                  f"{maximum if maximum is not None else '+inf'}]: keeping {kept}/{len(triangles)} triangles")
+            triangles = triangles[mask]
+
     areas = triangle_areas(triangles)
     valid = np.isfinite(areas) & (areas > 1e-10)
     triangles, areas = triangles[valid], areas[valid]

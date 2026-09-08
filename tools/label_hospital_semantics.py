@@ -8,7 +8,7 @@ omni.replicator / Isaac Sim synthetic-data tools expect).
 Usage (from the go2_omniverse project root):
     python label_hospital_semantics.py [--output <path>]
 
-Output defaults to  assets/env/hospital_labeled.usd.
+Output defaults to the internal semantic base used by the open-door scene.
 The original asset is NOT modified.
 """
 
@@ -23,12 +23,20 @@ from pathlib import Path
 # ── AppLauncher must come first ───────────────────────────────────────────────
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="Auto-label hospital USD semantics")
+parser = argparse.ArgumentParser(
+    description="Auto-label an indoor USD scene with shared semantic rules."
+)
 parser.add_argument(
     "--output",
     type=str,
-    default="assets/env/hospital_labeled.usd",
+    default="assets/env/big_scene/hospital/hospital_base.usd",
     help="Where to save the labeled USD (relative to this script or absolute).",
+)
+parser.add_argument(
+    "--scene-usd",
+    type=str,
+    default="",
+    help="Source USD to label. Defaults to the Isaac Hospital scene.",
 )
 AppLauncher.add_app_launcher_args(parser)
 args, _ = parser.parse_known_args()
@@ -40,6 +48,15 @@ simulation_app = app_launcher.app
 # ── Now safe to import USD / Omniverse modules ─────────────────────────────
 import omni.usd                          # noqa: E402
 from pxr import Usd, UsdGeom, Sdf       # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from core.semantic_labels import (  # noqa: E402
+    hospital_upper_floor_semantic_class,
+    stair_section_semantic_class,
+)
 
 try:
     from pxr import Semantics            # available in recent USD / Isaac Sim
@@ -89,13 +106,35 @@ LABEL_RULES: list[tuple[re.Pattern, str]] = [
 
 def infer_label(prim: Usd.Prim) -> str | None:
     """Infer leaf-first so a stair/rail parent cannot mask child geometry."""
+    audited_upper_floor = hospital_upper_floor_semantic_class(str(prim.GetPath()))
+    if audited_upper_floor is not None:
+        return audited_upper_floor
+    audited = stair_section_semantic_class(str(prim.GetPath()))
+    if audited is not None:
+        return audited
+    names: list[str] = []
     current = prim
     while current and current.IsValid() and not current.IsPseudoRoot():
-        name = current.GetName().lower()
+        names.append(current.GetName().lower())
+        current = current.GetParent()
+
+    # The Hospital stair assets use generic Section names.  Geometry audit:
+    # Geo_M_Stairs/Section1 is the 1.95 m handrail; in StairsPlane variants,
+    # Section0 is the narrow vertical side/guard and Section1/2 are surfaces.
+    leaf = names[0] if names else ""
+    if any("stairsplanehalfrail" in name for name in names):
+        return "wall"
+    if leaf == "section1" and "geo_m_stairs" in names:
+        return "wall"
+    if leaf == "section0" and any(
+        name.startswith("geo_m_stairsplane") for name in names
+    ):
+        return "wall"
+
+    for name in names:
         for pattern, label in LABEL_RULES:
             if pattern.search(name):
                 return label
-        current = current.GetParent()
     return None
 
 
@@ -118,7 +157,11 @@ def main() -> None:
         "ISAAC_ASSETS_ROOT",
         "/media/user/data1/isaac-sim-assets/merged/Assets/Isaac/4.5",
     )
-    HOSPITAL_USD = os.path.join(_assets_root, "Isaac/Environments/Hospital/hospital.usd")
+    scene_usd = args.scene_usd.strip()
+    if scene_usd:
+        HOSPITAL_USD = scene_usd
+    else:
+        HOSPITAL_USD = os.path.join(_assets_root, "Isaac/Environments/Hospital/hospital.usd")
 
     output_path = Path(args.output)
     if not output_path.is_absolute():

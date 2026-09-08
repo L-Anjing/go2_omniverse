@@ -4,6 +4,12 @@
 
 set -euo pipefail
 
+# IsaacLab must use the torch/torchvision pair installed in env_isaaclab.
+# The workstation user site contains a different torch build; if it is left
+# enabled, torchvision can fail during isaaclab_tasks import with
+# "operator torchvision::nms does not exist".
+export PYTHONNOUSERSITE=1
+
 # 1. 定义全局路径
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -64,6 +70,14 @@ fi
 # 3.3 激活 Conda 虚拟环境
 eval "$(conda shell.bash hook)"
 conda activate "${CONDA_ENV_NAME}"
+
+echo "[INFO] Python: $(command -v python)"
+python - <<'PY'
+import torch
+import torchvision
+print(f"[INFO] torch={torch.__version__} ({torch.__file__})")
+print(f"[INFO] torchvision={torchvision.__version__} ({torchvision.__file__})")
+PY
 
 # 4. 运行参数配置
 DEPLOY_ARCHITECTURE="${DEPLOY_ARCHITECTURE:-moe_cts}"

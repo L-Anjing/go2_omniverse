@@ -11,6 +11,60 @@ Point3 = tuple[float, float, float]
 Bounds3 = tuple[float, float, float, float, float, float]
 
 
+def constrain_xy_bounds(
+    scene_bounds: tuple[float, float, float, float],
+    *,
+    margin: float = 0.0,
+    x_range: tuple[float, float] | None = None,
+    y_range: tuple[float, float] | None = None,
+) -> tuple[float, float, float, float]:
+    """Intersect scene bounds with the configured robot start region."""
+    x_min, x_max, y_min, y_max = (float(value) for value in scene_bounds)
+    margin = max(float(margin), 0.0)
+    x_min += margin
+    x_max -= margin
+    y_min += margin
+    y_max -= margin
+    if x_range is not None:
+        x_min = max(x_min, float(x_range[0]))
+        x_max = min(x_max, float(x_range[1]))
+    if y_range is not None:
+        y_min = max(y_min, float(y_range[0]))
+        y_max = min(y_max, float(y_range[1]))
+    if x_min > x_max or y_min > y_max:
+        raise ValueError(
+            "Configured random-start region does not overlap the scene bounds"
+        )
+    return x_min, x_max, y_min, y_max
+
+
+def filter_points_hidden_below_traversal(
+    floor_points: Sequence[Point3],
+    traversal_points: Sequence[Point3],
+    *,
+    exclusion_radius_m: float,
+    minimum_overhead_height_m: float = 0.12,
+) -> tuple[list[Point3], int]:
+    """Remove floor samples geometrically hidden below stairs or ramps."""
+    radius_squared = max(float(exclusion_radius_m), 0.0) ** 2
+    if radius_squared <= 0.0 or not floor_points or not traversal_points:
+        return list(floor_points), 0
+    kept: list[Point3] = []
+    rejected = 0
+    for point in floor_points:
+        hidden = any(
+            (surface[0] - point[0]) ** 2 + (surface[1] - point[1]) ** 2
+            <= radius_squared
+            and surface[2] - point[2] > minimum_overhead_height_m
+            for surface in traversal_points
+        )
+        if hidden:
+            rejected += 1
+        else:
+            kept.append(point)
+    return kept, rejected
+
+
 def is_walkable_triangle(
     vertices: Sequence[Point3],
     *,

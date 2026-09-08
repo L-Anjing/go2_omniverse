@@ -1,167 +1,153 @@
 # go2_omniverse
 
-Forked from https://github.com/abizovnuralem/go2_omniverse  
-Reference repo https://github.com/wty-yy/go2_rl_gym
+Isaac Lab / Isaac Sim 中的 Unitree Go2 仿真、传感器发布和大场景语义资产。
 
----
-
-## 项目简介
-
-本仓库主要实现以下功能：
-- 在 Isaac Lab / Omniverse 中进行 Go2、G1 机器人的仿真与推理
-- 训练并部署 Go2 机器人的 CTS / MoE-CTS 楼梯 / full-scene 运动控制策略
-
-## 已实现功能
-
-- Go2 / G1 仿真运行与 checkpoint 模型推理
-- 键盘控制与 ROS2 `cmd_vel` 控制
-- ROS2 传感器数据与机器人状态发布
-- RTX LiDAR（适配 Point_LIO）、IMU、相机（单目 / 双目 RGBD）、语义分割数据输出
-- `hospital` / `office` / `warehouse` 场景加载
-- Go2 CTS / MoE-CTS 模型训练、日志保存与 checkpoint 部署
-
-## 主要入口文件
-
-- 仿真入口：`main.py`
-- 仿真主逻辑：`core/omniverse_sim.py`
-- ROS2 发布：`core/ros2.py`
-- 环境配置：`configs/custom_rl_env.py`
-- Go2 CTS / MoE-CTS 训练：`train_stairs.py`
-- 常用仿真脚本：`scripts/run_sim.sh`
-- 常用训练脚本：`scripts/run_train_stairs.sh`
-
-## 使用方法
-
-### 1. 启动 Go2 仿真
+## 环境准备
 
 ```bash
-cd go2_omniverse
-./scripts/run_sim.sh
+source /opt/ros/humble/setup.bash
+conda activate env_isaaclab
+cd /media/user/data1/carl/workspace/go2_omniverse
 ```
 
-切到 `MoE-CTS` 部署：
+首次运行 `scripts/run_sim.sh` 会编译并 source：
+
+- `IsaacSim-ros_workspaces/humble_ws`
+- `go2_omniverse_ws`
+
+`run_sim.sh` 会设置 `PYTHONNOUSERSITE=1`，确保 IsaacLab 使用
+`env_isaaclab` 内匹配的 PyTorch/torchvision。不要让 `~/.local` 中其他 CUDA 或
+PyTorch 版本覆盖该环境；启动时脚本会打印两个包的版本和实际路径。
+
+也可以预先构建后设置 `SKIP_ROS_BUILD=true`。换机器时重点检查：
+
 ```bash
+export ISAAC_ASSETS_ROOT=/absolute/path/to/Assets/Isaac/4.5
+export CONDA_ENV_NAME=env_isaaclab
+```
+
+## 启动仿真
+
+推荐使用 ROS2 控制、单目 RGB、深度和 labeled Hospital 场景：
+
+```bash
+cd /media/user/data1/carl/workspace/go2_omniverse
+CMD_SOURCE=ros2 CAMERA_MODE=single ENABLE_DEPTH=true \
+CUSTOM_ENV=hospital ./scripts/run_sim.sh
+```
+
+headless 模式：
+
+```bash
+HEADLESS=1 CMD_SOURCE=ros2 ENABLE_DEPTH=true \
+CUSTOM_ENV=hospital ./scripts/run_sim.sh
+```
+
+部署模型可切换：
+
+```bash
+DEPLOY_ARCHITECTURE=cts ./scripts/run_sim.sh
 DEPLOY_ARCHITECTURE=moe_cts ./scripts/run_sim.sh
 ```
 
-默认加载配置：
-- `DEPLOY_ARCHITECTURE=cts`
-- `EXPERIMENT_NAME=unitree_go2_fullscene_cts/seed_*`
-- `CHECKPOINT=model_*.pt`
-- `CMD_SOURCE=ros2`
-- `CAMERA_MODE=single`
-- `ENABLE_DEPTH=false`
+默认参数包括 `CUSTOM_ENV=hospital`、`CMD_SOURCE=ros2`、`ENABLE_DEPTH=true`、
+`CAMERA_MODE=single`。启动时会打印实际场景、传感器与 checkpoint 配置。
 
-启动键盘控制：
-```
-ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -r cmd_vel:=/robot0/cmd_vel
-```
+## Big scene 资产
 
-可自行 CMD 修改参数，支持 keyboard 控制。
-如需切到 `MoE-CTS` 部署，优先使用显式开关：
-```bash
-DEPLOY_ARCHITECTURE=moe_cts ./scripts/run_sim.sh
-```
-如需自定义，也可继续手动覆盖 `EXPERIMENT_NAME` 与 `CHECKPOINT`。
+当前大场景位于 `assets/env/big_scene/`：
 
-#### 双目 RGBD 相机
-
-切换到双目立体相机 (`go2_double_camera.usd`) 并发布深度图：
-```bash
-CAMERA_MODE=double ENABLE_DEPTH=true ./scripts/run_sim.sh
+```text
+hospital/hospital_base.usd
+hospital/hospital_navigation.usda
+office/office_base.usd
+office/office_navigation.usda
+warehouse/warehouse_base.usd
+warehouse/warehouse_navigation.usda
 ```
 
-仅双目 RGB 不发布深度（默认）：
-```bash
-CAMERA_MODE=double ./scripts/run_sim.sh
-```
+Hospital 和 warehouse 的正式运行路径由 `core/omniverse_sim.py` 固定到 labeled
+`*_navigation.usda`，防止采集时误加载未标注资产。open-door 变体用于离线资产处理和
+验证，不能绕过正式 profile 的路径检查。
 
-单目 RGBD：
-```bash
-ENABLE_DEPTH=true ./scripts/run_sim.sh
-```
-
-
-### 2. 启动双卡训练
+离线生成 Hospital 语义与开门 overlay：
 
 ```bash
-./scripts/run_train_stairs.sh
+python tools/usd_scene_pipeline.py navigation-overlay \
+  assets/env/big_scene/hospital/hospital_base.usd \
+  --output assets/env/big_scene/hospital/hospital_navigation.usda \
+  --json assets/env/big_scene/hospital/hospital_navigation.json \
+  --open-doors --all-semantics
 ```
 
-自定义环境数量与训练轮数：
-```bash
-./scripts/run_train_stairs.sh 4096 150000
-```
+## 语义标注约定
 
-训练参考仓库同构的 `MoE-CTS`：
-```bash
-ARCHITECTURE=moe_cts ./scripts/run_train_stairs.sh
-```
+语义必须在 USD source / composed runtime stage 的实际 rendered Mesh 上生效：
 
-也可以直接调用：
-```bash
-python train_stairs.py --architecture moe_cts --headless
-```
+| 对象 | USD semanticData | 对应语义类别 |
+|---|---|---|
+| floor / corridor / upper-floor support surface | `floor` | `navigable` |
+| stair tread / step / stair landing | `stairs` | `terrain_transition` |
+| railing / handrail / guardrail / fence | `wall` | `structure` |
+| wall / door panel / door frame / jamb | `wall` | `structure` |
+| ceiling | `ceiling` 或拆分楼板的 `wall` | `structure` |
+| warning sign | `sign` | `sign` |
 
-如需显式训练普通 `CTS`：
-```bash
-python train_stairs.py --architecture cts --headless
-```
+当前 `--open-doors` overlay 将识别到的 door panel 设为 inactive；门框保持 `wall`。
+门洞后方实际可见的 floor 才是 `navigable`。楼梯踏步与栏杆应是独立 Prim/Mesh，不能在 stair root 上统一
+覆盖所有子项，也不能用 traversability、depth、normal 或 morphology 后处理掩盖源头
+语义错误。
 
-## 输出路径
+出现楼梯为 background 或栏杆为可通行区域时，排查顺序是：
 
-### 训练日志
-- `logs/train_stairs_logs/train_gpu0.log`
-- `logs/train_stairs_logs/train_gpu1.log`
+1. 确认运行时加载的 USD 路径和 composed runtime stage；
+2. 检查楼梯 rendered Mesh 的 semantic type/data；
+3. 检查 semantic annotator 的 raw ID 与 `idToLabels`；
+4. 核对消费端是否按 raw label 映射语义类别。
 
-### 训练 PID
-- `logs/train_stairs_logs/train_gpu0.pid`
-- `logs/train_stairs_logs/train_gpu1.pid`
-
-### Checkpoint 默认目录
-- `logs/rsl_rl/unitree_go2_fullscene_cts/seed_*/`
-- `logs/rsl_rl/unitree_go2_fullscene_moe_cts/seed_*/`
-
-## 常用命令
-
-### 实时查看训练日志
-```bash
-tail -f logs/train_stairs_logs/train_gpu0.log | grep -E '\[(CTS|MoECTS)|ERROR|Traceback'
-tail -f logs/train_stairs_logs/train_gpu1.log | grep -E '\[(CTS|MoECTS)|ERROR|Traceback'
-```
-
-### 停止双卡训练
-```bash
-kill -9 -$(cat logs/train_stairs_logs/train_gpu0.pid) -$(cat logs/train_stairs_logs/train_gpu1.pid)
-```
+Hospital 的 `Geo_Roof_Costum1_34`、`Geo_Roof_Costum6_19` 楼板同时包含二层支撑面和
+一层天花板。离线生成工具将其顶面提取为同级 `*_SupportSurface` Mesh，标为 `floor`；
+原 Mesh 的底面和侧面标为 `wall`。分类限定于这两块已审核楼板，并核对顶面高度和朝向。
+静态几何和标签检查通过不等于运行时图像已验证，仍需检查实际 annotator 输出。
 
 ## ROS2 话题
 
-### 控制输入
-- `robot0/cmd_vel`
+控制输入：
 
-### 常用输出
-- `robot0/odom`
-- `robot0/imu`
-- `robot0/point_cloud2_L1`
-- `robot0/front_cam/rgb`
-- `robot0/front_cam/depth`                     (if `ENABLE_DEPTH=true`)
-- `robot0/front_cam/camera_info`
-- `robot0/front_cam/semantic_segmentation`
+```text
+/robot0/cmd_vel
+```
 
-### 双目相机输出 (CAMERA_MODE=double)
-- `robot0/front_cam_left/rgb`
-- `robot0/front_cam_right/rgb`
-- `robot0/front_cam_left/depth`                (if `ENABLE_DEPTH=true`)
-- `robot0/front_cam_right/depth`               (if `ENABLE_DEPTH=true`)
-- `robot0/front_cam_left/camera_info`
-- `robot0/front_cam_right/camera_info`
-- `robot0/front_cam_left/semantic_segmentation`
-- `robot0/front_cam_right/semantic_segmentation`
+主要传感器：
 
-## 补充说明
+```text
+/robot0/odom
+/robot0/imu
+/robot0/point_cloud2_L1
+/robot0/front_cam/rgb
+/robot0/front_cam/depth
+/robot0/front_cam/camera_info
+/robot0/front_cam/semantic_segmentation
+/robot0/front_cam/semantic_segmentation_labels
+```
 
-- Go2 的 CTS / MoE-CTS 部署会根据 checkpoint 自动匹配 `45D` 或 `48D` student observation
-- `hospital`、`office`、`warehouse` 场景资产位于 `assets/env/`
-- 详细训练迭代记录见 `docs/TRAIN_UPDATE.md`
-- 详细仿真改动记录见 `docs/SIM_UPDATE.md`
+双目模式 (`CAMERA_MODE=double`) 额外发布 `/robot0/front_cam_left/*` 和
+`/robot0/front_cam_right/*`。Depth 话题仅在 `ENABLE_DEPTH=true` 时可用。
+
+键盘控制示例：
+
+```bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard \
+  --ros-args -r cmd_vel:=/robot0/cmd_vel
+```
+
+## 训练与部署
+
+楼梯/全场景 CTS 训练：
+
+```bash
+./scripts/run_train_stairs.sh
+ARCHITECTURE=moe_cts ./scripts/run_train_stairs.sh
+```
+
+训练参数和 checkpoint 路径见 `scripts/run_train_stairs.sh`、`scripts/run_sim.sh`。

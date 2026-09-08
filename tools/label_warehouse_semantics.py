@@ -55,6 +55,8 @@ except ImportError:
 #   BACKGROUND(0), NAVIGABLE(1), FORKLIFT(2), PALLET(3), CONE(4), SIGN(5), FENCE(6)
 # plus extended classes for richer semantic understanding.
 LABEL_RULES: list[tuple[re.Pattern, str]] = [
+    # Physical warning signs take precedence over the word "floor".
+    (re.compile(r"wet_?floor_?sign"), "sign"),
     # ── Structural ────────────────────────────────────────────────────────
     (re.compile(r"floor|ground|slab|floor_decal|floor_?dec"), "floor"),
     (re.compile(r"ceiling|ceil"),                           "ceiling"),
@@ -79,7 +81,6 @@ LABEL_RULES: list[tuple[re.Pattern, str]] = [
     # ── Signs / labels ────────────────────────────────────────────────────
     (re.compile(r"aisle_sign|aislesign|sign_a|sign_b|sign_c|signcver|barcode"), "sign"),
     (re.compile(r"emergency_board|emergencyboard|fire_extinguisher|fireextinguisher|fuse_box|fusebox"), "safety"),
-    (re.compile(r"wet_floor_sign|wetfloorsign"),            "sign"),
     # ── Hazard / safety ───────────────────────────────────────────────────
     (re.compile(r"traffic_cone|trafficcone|cone"),          "cone"),
     # ── Lighting / electrical ─────────────────────────────────────────────

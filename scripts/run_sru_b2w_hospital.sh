@@ -7,7 +7,7 @@ WORKSPACE="$(cd "${ROOT}/.." && pwd)"
 SRU_SIM="${SRU_SIM_ROOT:-${WORKSPACE}/sru-navigation-sim}"
 DEPLOY="${SRU_DEPLOY_ROOT:-${WORKSPACE}/Data_collection/external/sru-robot-deployment}"
 
-export SRU_HOSPITAL_USD="${SRU_HOSPITAL_USD:-${ROOT}/assets/env/hospital_labeled.usd}"
+export SRU_HOSPITAL_USD="${SRU_HOSPITAL_USD:-${ROOT}/assets/env/big_scene/hospital/hospital_navigation.usda}"
 export SRU_HOSPITAL_SPATIAL_MAP="${SRU_HOSPITAL_SPATIAL_MAP:-${WORKSPACE}/Data_collection/logs/spatial_bounds_hospital.json}"
 export SRU_NAV_POLICY_TORCHSCRIPT="${SRU_NAV_POLICY_TORCHSCRIPT:-${DEPLOY}/rl_nav_controller/deployment_policies/nav_policy_new.pt}"
 export SRU_STAIRS_EPISODES="${SRU_STAIRS_EPISODES:-0}"

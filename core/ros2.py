@@ -21,6 +21,7 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import os
 import time
 import numpy as np
 
@@ -144,6 +145,54 @@ def add_camera(num_envs, robot_type, camera_mode="single"):
     # background values. A 30 m far plane also makes no-hit depth explicit.
     DEFAULT_POS = (0.32487, -0.00095, 0.05362)
     DEFAULT_ROT = (0.5, -0.5, 0.5, -0.5)  # w,x,y,z ROS convention
+
+    # Optional nose-down camera tilt (degrees) for a head-mounted RGB-D rig
+    # (e.g. RealSense D455) that needs more floor/tread in view while
+    # climbing.  Zero keeps the stock horizontal Go2 front camera exactly as
+    # before, so existing datasets and extrinsic configs are unaffected.
+    # Set CAMERA_TILT_DEG in the environment to enable the tilted view; the
+    # matching extrinsic must then be used by the collector (see
+    # Data_collection/configs/collector.yaml camera_extrinsic notes).
+    tilt_deg = 0.0
+    try:
+        tilt_deg = float(os.environ.get("CAMERA_TILT_DEG", "0"))
+    except (TypeError, ValueError):
+        tilt_deg = 0.0
+    if abs(tilt_deg) > 0.0:
+        # Nose-down tilt: rotate the optical axis about the BASE x axis by
+        # tilt_deg (positive = camera looks down).  The stock camera looks
+        # along base -y (optical axis [0,-1,0]); after tilting it points at
+        # [0, -cos(tilt), -sin(tilt)].
+        #
+        # Composition: q_new = q_stock * q_tilt^-1.  (q_tilt is a rotation
+        # about base x; its inverse applied on the right tilts the camera's
+        # view downward.  Verified: tilt=15 -> optical axis [0,-0.966,-0.259],
+        # and tilt=0 reproduces the stock quaternion bit-for-bit.)
+        theta = float(np.radians(tilt_deg))
+        c2, s2 = np.cos(theta * 0.5), np.sin(theta * 0.5)
+        q_tilt = np.asarray([c2, s2, 0.0, 0.0], dtype=np.float64)  # w,x,y,z
+        q_tilt_inv = np.asarray([q_tilt[0], -q_tilt[1], -q_tilt[2], -q_tilt[3]])
+        q_stock = np.asarray(DEFAULT_ROT, dtype=np.float64)  # w,x,y,z
+        w1, x1, y1, z1 = q_stock
+        w2, x2, y2, z2 = q_tilt_inv
+        q_new = np.asarray(
+            [
+                w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
+                w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
+                w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
+                w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
+            ],
+            dtype=np.float64,
+        )
+        norm = float(np.linalg.norm(q_new))
+        if norm > 1e-12:
+            q_new = q_new / norm
+        DEFAULT_ROT = (float(q_new[0]), float(q_new[1]), float(q_new[2]), float(q_new[3]))
+        print(
+            f"[INFO] Camera tilt enabled: {tilt_deg:.1f} deg nose-down; "
+            f"front_cam rot(wxyz)={DEFAULT_ROT}",
+            flush=True,
+        )
 
     if camera_mode == "double":
         cam_configs = [
@@ -563,6 +612,3 @@ class RobotBaseNode(Node):
         pc_msg.data            = buf.tobytes()
 
         publisher.publish(pc_msg)
-
-    async def run(self):
-        pass
