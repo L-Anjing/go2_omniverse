@@ -10,7 +10,7 @@ conda activate env_isaaclab
 cd /media/user/data1/carl/workspace/go2_omniverse
 ```
 
-首次运行 `scripts/run_sim.sh` 会编译并 source：
+首次运行 `commands/run_sim.sh` 会编译并 source：
 
 - `IsaacSim-ros_workspaces/humble_ws`
 - `go2_omniverse_ws`
@@ -33,14 +33,14 @@ export CONDA_ENV_NAME=env_isaaclab
 ```bash
 cd /media/user/data1/carl/workspace/go2_omniverse
 CMD_SOURCE=ros2 \
-CUSTOM_ENV=hospital ./scripts/run_sim.sh
+CUSTOM_ENV=hospital ./commands/run_sim.sh
 ```
 
 headless 模式：
 
 ```bash
 HEADLESS=1 CMD_SOURCE=ros2 \
-CUSTOM_ENV=hospital ./scripts/run_sim.sh
+CUSTOM_ENV=hospital ./commands/run_sim.sh
 ```
 
 默认参数包括 `CUSTOM_ENV=hospital`、`CMD_SOURCE=ros2`，
@@ -137,7 +137,7 @@ T_base_front_cam =[ [ R_base_front_cam  t_base_front_cam ],
 
 ```bash
 export FRONT_CAM_EXTRINSIC="0 0 1 0.32487 -1 0 0 -0.00095 0 -1 0 0.05362 0 0 0 1"
-./scripts/run_sim.sh
+./commands/run_sim.sh
 ```
 
 
@@ -153,7 +153,7 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard \
 MoE-CTS 楼梯/全场景强化学习训练：
 
 ```bash
-./scripts/run_train_stairs.sh
+./commands/run_train_stairs.sh
 ```
 
 训练固定使用 `ActorCriticMoECTS + MoECTS`。可以用 `CHECKPOINT` 继续训练，也可以用
@@ -161,7 +161,7 @@ MoE-CTS 楼梯/全场景强化学习训练：
 
 ```bash
 CHECKPOINT=logs/rsl_rl/unitree_go2_fullscene_moe_cts/seed_123/model_14000.pt \
-  ./scripts/run_train_stairs.sh
+  ./commands/run_train_stairs.sh
 ```
 
 部署默认读取 `logs/rsl_rl/unitree_go2_fullscene_moe_cts/`，可通过 `LOAD_RUN` 和
