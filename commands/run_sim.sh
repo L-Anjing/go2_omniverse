@@ -9,6 +9,10 @@ set -euo pipefail
 # enabled, torchvision can fail during isaaclab_tasks import with
 # "operator torchvision::nms does not exist".
 export PYTHONNOUSERSITE=1
+# Keep Isaac Sim on physical GPU1 by default. With CUDA_VISIBLE_DEVICES=1,
+# Isaac/PyTorch sees that card as logical cuda:0, so the main.py device can
+# remain "--device cuda".
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 
 # 1. 定义全局路径
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -99,6 +103,7 @@ echo "[INFO] Camera: front_cam"
 echo "[INFO] Headless: ${HEADLESS}"
 echo "[INFO] Custom environment: ${CUSTOM_ENV}"
 echo "[INFO] Robot environments: ${ROBOT_AMOUNT}"
+echo "[INFO] CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES}"
 HEADLESS_FLAG=""
 if [ "${HEADLESS}" = "1" ] || [ "${HEADLESS}" = "true" ] || [ "${HEADLESS}" = "True" ]; then
     HEADLESS_FLAG="--headless"

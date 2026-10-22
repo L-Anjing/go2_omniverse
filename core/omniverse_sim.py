@@ -187,6 +187,7 @@ _SPATIAL_MAP_METADATA: dict[str, object] = {}
 _CUSTOM_SCENE_PRIM_PATH = ""
 _EPISODE_RESET_REQUESTED = threading.Event()
 _EPISODE_RESET_COMPLETED = threading.Event()
+_EPISODE_RESET_STARTED = threading.Event()
 _EPISODE_RESET_LOCK = threading.Lock()
 _EPISODE_RESET_ERROR = ""
 
@@ -1907,12 +1908,15 @@ def _request_episode_reset(_request, response):
             response.message = "episode reset already pending"
             return response
         _EPISODE_RESET_ERROR = ""
+        _EPISODE_RESET_STARTED.clear()
         _EPISODE_RESET_COMPLETED.clear()
         _EPISODE_RESET_REQUESTED.set()
-    timeout = _spatial_float_env("EPISODE_RESET_SERVICE_TIMEOUT_SEC", 15.0)
+    timeout = _spatial_float_env("EPISODE_RESET_SERVICE_TIMEOUT_SEC", 60.0)
+    print(f"[reset] Request queued; completion timeout={timeout:.1f}s", flush=True)
     if not _EPISODE_RESET_COMPLETED.wait(timeout=timeout):
         response.success = False
-        response.message = f"simulation reset timed out after {timeout:.1f}s"
+        phase = "inside env.reset/state validation" if _EPISODE_RESET_STARTED.is_set() else "waiting for simulation loop"
+        response.message = f"simulation reset timed out after {timeout:.1f}s ({phase})"
         return response
     response.success = not _EPISODE_RESET_ERROR
     response.message = _EPISODE_RESET_ERROR or "simulation reset complete"
@@ -1925,7 +1929,8 @@ def add_cmd_sub(num_envs):
         node_test.create_subscription(
             Twist, f"robot{i}/cmd_vel", lambda msg, i=i: cmd_vel_cb(msg, str(i)), 10
         )
-        node_test.create_service(Trigger, f"robot{i}/reset_episode", _request_episode_reset)
+        # Reset services are registered after the first successful simulation
+        # step. Command subscription alone does not imply RTX/physics readiness.
     # Spin in a separate thread
     def _spin_until_shutdown():
         try:
@@ -2213,6 +2218,9 @@ def run_sim():
         # run everything in inference mode
         with torch.inference_mode():
             if _EPISODE_RESET_REQUESTED.is_set():
+                _EPISODE_RESET_STARTED.set()
+                reset_started_at = time.monotonic()
+                print("[reset] Simulation loop starting env.reset()", flush=True)
                 try:
                     for robot_index in range(env_cfg.scene.num_envs):
                         custom_rl_env.base_command[str(robot_index)] = [0, 0, 0]
@@ -2232,6 +2240,7 @@ def run_sim():
                     _EPISODE_RESET_ERROR = str(error)
                     print(f"[ERROR] Episode reset failed: {error}", flush=True)
                 finally:
+                    print(f"[reset] Reset processing took {time.monotonic() - reset_started_at:.2f}s", flush=True)
                     _EPISODE_RESET_REQUESTED.clear()
                     _EPISODE_RESET_COMPLETED.set()
                 continue
@@ -2260,6 +2269,11 @@ def run_sim():
             )
             # --- debug: print early root state so we can distinguish
             # physics-state corruption from render-only issues ---
+            if _dbg_step == 0 and cmd_node is not None:
+                for robot_index in range(env_cfg.scene.num_envs):
+                    cmd_node.create_service(
+                        Trigger, f"robot{robot_index}/reset_episode", _request_episode_reset)
+                print("[reset] Services ready after first successful simulation step", flush=True)
             _dbg_step += 1
             _should_log_dbg = (
                 (_dbg_step <= 5)
