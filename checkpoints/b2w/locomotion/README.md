@@ -1,5 +1,9 @@
-# B2W 仿真运动策略
+# B2W locomotion policy
 
-放置 `policy_b2w_new_2.pt`，由 `ROBOT_TYPE=b2w` 默认加载。该 TorchScript 策略使用 60D 状态，输出 12D 腿部动作与 4D 轮速动作。
-
-权重需从已有服务器文件补齐。SRU 导航策略由独立部署工程管理。
+`policy_b2w_new_2.pt` (2,024,914 bytes, SHA-256
+`d2cece212a16ad53ebea4a8b096090b440b5d22ed6fdbc6800ddffddfb393a3b`) is the
+server's recurrent TorchScript motion policy. `core/b2w_policy.py` consumes a 60D
+state and validates its 16D output (12 leg actions and 4 wheel actions). The
+unified entry selects it for `ROBOT_TYPE=b2w`, currently on Hospital only. This
+is an asset/entry configuration status; a server closed-loop run is not yet
+verified. SRU and other high-level policies remain external.

@@ -1,17 +1,33 @@
 {
-  "description": "Local USD inventory before server asset merge; paths are relative to repository root.",
+  "description": "Robot asset inventory on the server; external Isaac assets are recorded but not vendored.",
   "models": [
+    {
+      "robot": "go2",
+      "path": "${ISAAC_ASSETS_ROOT}/Isaac/IsaacLab/Robots/Unitree/Go2/go2.usd",
+      "bytes": 10462,
+      "sha256": "d0a2c624674355af14d93a7512614fec115750d57a7fd5222c4d19234e48c11f",
+      "source": "Isaac Sim 4.5 asset root; used by configs/custom_rl_env.py"
+    },
+    {
+      "robot": "b2w",
+      "path": "assets/robots/b2w/b2w_rsl.usd",
+      "bytes": 44033387,
+      "sha256": "5801459641e40b9bd2b48dc76c566f483f5077ffd4097d364fb76fd81a71b0c2",
+      "source": "Server robot asset; configs/b2w_deploy.py"
+    },
     {
       "robot": "g1",
       "path": "assets/robots/g1/g1.usd",
       "bytes": 23296549,
-      "sha256": "f96da90e60841866b501fb3a8597f4ee04840c19d25af1b3d3ecf1fe98d1b753"
+      "sha256": "f96da90e60841866b501fb3a8597f4ee04840c19d25af1b3d3ecf1fe98d1b753",
+      "source": "Server robot asset; assets/robots/g1/config.py"
     },
     {
       "robot": "copter",
       "path": "assets/robots/copter/cf2x.usd",
       "bytes": 215712,
-      "sha256": "d5e57dcdd28f929b018186aa41c35e8e8685c11ea6582f2eca2b450736ccb5ad"
+      "sha256": "d5e57dcdd28f929b018186aa1c35e8e8685c11ea6582f2eca2b450736ccb5ad",
+      "source": "Server robot asset; assets/robots/copter/config.py"
     }
   ]
 }

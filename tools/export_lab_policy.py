@@ -7,8 +7,12 @@ from __future__ import annotations
 
 import argparse
 import ast
+from datetime import datetime, timezone
 import hashlib
 import importlib.util
+import json
+import os
+import platform
 from pathlib import Path
 import subprocess
 import sys
@@ -114,7 +118,7 @@ def main():
                                 training_velocity_max=[r[1] for r in flat_ranges],
                                 actuator_delay_steps=0, joint_friction=0.01, armature=0.0)
     config['provenance'] = {
-        'repository': str(source),
+        'repository': os.path.relpath(source, ROOT),
         'commit': subprocess.check_output(['git', '-C', str(source), 'rev-parse', 'HEAD'], text=True).strip(),
         'branch': subprocess.check_output(['git', '-C', str(source), 'branch', '--show-current'], text=True).strip(),
         'exporter': 'source/rsl_rl/rsl_rl/moe_cts/exporter.py:export_policy_as_jit',
@@ -133,6 +137,28 @@ def main():
         result = module(torch.zeros(1, single_dim))
         assert result.shape == (1, actions) and torch.isfinite(result).all()
         module.reset()
+    policy_path = args.output / 'policy.pt'
+    config_path = args.output / 'config.yaml'
+    def sha256(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    manifest = {
+        'exported_at_utc': datetime.now(timezone.utc).isoformat(),
+        'source_checkpoint': os.path.relpath(checkpoint, ROOT),
+        'source_checkpoint_sha256': sha256(checkpoint),
+        'source_repository': os.path.relpath(source, ROOT),
+        'source_commit': config['provenance']['commit'],
+        'source_branch': config['provenance']['branch'],
+        'exporter': config['provenance']['exporter'],
+        'exporter_script_sha256': sha256(Path(__file__).resolve()),
+        'torch_version': torch.__version__,
+        'python_version': platform.python_version(),
+        'dimensions': {'single_observation': single_dim, 'history_observation': history_dim,
+                       'actions': actions, 'experts': experts, 'latent': latent},
+        'validation': {'torchscript_load': 'PASS', 'zero_input_forward': 'PASS',
+                       'output_shape': list(result.shape), 'finite_output': True,
+                       'policy_sha256': sha256(policy_path), 'config_sha256': sha256(config_path)},
+    }
+    (args.output / 'export_manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     print(f'Exported student: {args.output.resolve()} ({single_dim}D x {history_dim // single_dim}, {actions} actions)')
 
 

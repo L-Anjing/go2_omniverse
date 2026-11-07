@@ -9,7 +9,7 @@
 
 | 项目 | 旧版当前默认权重 | 新版 Lab |
 |---|---|---|
-| 原始文件 | `checkpoints/model_164000.pt` | `checkpoints/moe_cts_lab.pt`，iteration 82500 |
+| 原始文件 | `checkpoints/go2/moe_cts/legacy/model_164000.pt` | `checkpoints/go2/moe_cts/source/moe_cts_lab.pt`，iteration 82500 |
 | 部署格式 | 原始 PyTorch state_dict，现场构造 actor/student | 官方 exporter 生成 TorchScript student |
 | 单帧 | 45D（另支持旧版 48D） | 45D |
 | 历史 | 5 帧，按时间堆叠后 flatten | 10 帧，各观测项的时间块依次排列，450D |
@@ -49,7 +49,7 @@ action manager `JointPositionAction` → `Articulation.set_joint_position_target
 导出使用本地官方 `moe_cts/modules/moe.py` 网络与 `moe_cts/exporter.py`。
 薄 student 包装与官方 `StudentMoEEncoder` 相同，仅组合 MoE 与 L2Norm，避免导入训练用
 TensorDict/Isaac Lab 3 依赖。actor/student 所有参数均严格加载；teacher/critic/optimizer 不进入导出。
-导出配置包含源 commit、原始 ckpt SHA256、部署配置 SHA256 和官方 metadata。
+导出配置包含源 commit、原始 ckpt SHA256、部署配置 SHA256 和官方 metadata；同目录 `export_manifest.json` 记录导出产物哈希及加载/前向 smoke test。
 ckpt 不包含原训练 `params/env.yaml`、`params/agent.yaml`，因此 activation、normalization、
 controller 配置以本地分支为准，不能将其称为原始训练快照。
 

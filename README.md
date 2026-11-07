@@ -18,12 +18,12 @@ flowchart LR
 
 ### 机器人适配状态
 
-| 机器人 | 当前实现 | 启动与边界 |
-| --- | --- | --- |
-| Go2 四足 | Lab MoE-CTS、RGB-D、语义与 LiDAR；可选独立双目建图传感器 | `ROBOT_TYPE=go2`，支持本文 Go2 建图示例 |
-| B2W 轮足 | 独立 60D 状态 / 16D 动作策略、RayCaster Depth、RTX RGB、跟随视角 | `ROBOT_TYPE=b2w`，当前统一入口限定 Hospital |
-| G1 人形 | `assets/robots/g1/` 资产与 `G1RoughEnvCfg`、agent 配置 | 尚未接入当前 `run_sim.sh` 的机器人选项 |
-| Crazyflie 与其他扩展 | `assets/robots/copter/` 等资产配置，按机器人适配层扩展 | 资产存在不等于完成运行入口与闭环验证 |
+| 机器人 | 资产 / 配置 | 统一入口 | 闭环验证状态 |
+| --- | --- | --- | --- |
+| Go2 四足 | 使用 Isaac Sim 4.5 外部 Go2 USD；Lab MoE-CTS、RGB-D；可选 D455f + TWIN612 | `ROBOT_TYPE=go2`，默认 policy 路径已归并 | Go2 locomotion 有历史仿真验证记录；本次服务器双目传感器与 Hospital 探索闭环未测试 |
+| B2W 轮足 | 本仓库有 USD、articulation 配置、60D/16D 运动权重 | `ROBOT_TYPE=b2w`，统一入口仅支持 Hospital | 当前服务器上未完成闭环验证 |
+| G1 人形 | `assets/robots/g1/` USD、机器人与 agent 配置 | 未接入当前 `run_sim.sh` 机器人选项 | 未验证统一入口或闭环 |
+| Crazyflie | `assets/robots/copter/` CF2X USD 与配置 | 未接入当前 `run_sim.sh` 机器人选项 | 未验证统一入口或闭环 |
 
 Go2/B2W 每个进程选择一种机器人，`ROBOT_AMOUNT` 复制该类型；混合机器人同进程生成尚未接入。
 

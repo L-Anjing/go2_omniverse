@@ -1,5 +1,6 @@
-# Go2 MoE-CTS 原始权重
+# Go2 MoE-CTS source checkpoint
 
-放置 `moe_cts_lab.pt`。这是 exporter 的输入，与仿真直接加载的 TorchScript 导出分开保存。
-
-在仓库根目录运行 `python tools/export_lab_policy.py`，输出到同级 `../export/`。原始权重需从已有服务器文件补齐。
+`moe_cts_lab.pt` is the 26,367,183-byte iteration-82,500 raw checkpoint
+(SHA-256 `48e2018b18bfbaa36cec5911a9295babbdc1a3748b97e47ce2adde7e4ca86e52`).
+It is consumed by `python tools/export_lab_policy.py`; runtime inference loads the
+paired TorchScript export from `../export/`.

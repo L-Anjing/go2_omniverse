@@ -1,5 +1,7 @@
-# Go2 MoE-CTS 仿真导出
+# Go2 MoE-CTS runtime export
 
-保存同一次导出的 `policy.pt`、`config.yaml` 和生成的审计元数据。`run_sim.sh` 的 Go2 默认读取此目录。
-
-部署接口：45D 单帧观测、10 帧历史、12D 动作。权重与配套配置需一起从服务器补齐或重新导出。
+`policy.pt`, `config.yaml`, and `export_manifest.json` belong to the same export.
+`commands/run_sim.sh` selects `policy.pt` and this directory's config by default.
+The manifest records source and artifact SHA-256 values, pinned exporter source,
+model dimensions, runtime versions, and a TorchScript smoke check. The current
+45D single-frame input maintains 10 frames internally and returns 12 actions.
