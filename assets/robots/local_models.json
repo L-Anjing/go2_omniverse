@@ -1,0 +1,17 @@
+{
+  "description": "Local USD inventory before server asset merge; paths are relative to repository root.",
+  "models": [
+    {
+      "robot": "g1",
+      "path": "assets/robots/g1/g1.usd",
+      "bytes": 23296549,
+      "sha256": "f96da90e60841866b501fb3a8597f4ee04840c19d25af1b3d3ecf1fe98d1b753"
+    },
+    {
+      "robot": "copter",
+      "path": "assets/robots/copter/cf2x.usd",
+      "bytes": 215712,
+      "sha256": "d5e57dcdd28f929b018186aa41c35e8e8685c11ea6582f2eca2b450736ccb5ad"
+    }
+  ]
+}

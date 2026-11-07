@@ -87,12 +87,12 @@ PY
 CONTROLLER="${CONTROLLER:-lab}"
 ROBOT_TYPE="${ROBOT_TYPE:-go2}"
 case "${ROBOT_TYPE}" in
-    go2) DEFAULT_LOCOMOTION_POLICY="checkpoints/moe_cts_lab/policy.pt" ;;
-    b2w) DEFAULT_LOCOMOTION_POLICY="checkpoints/b2w/policy_b2w_new_2.pt" ;;
+    go2) DEFAULT_LOCOMOTION_POLICY="checkpoints/go2/moe_cts/export/policy.pt" ;;
+    b2w) DEFAULT_LOCOMOTION_POLICY="checkpoints/b2w/locomotion/policy_b2w_new_2.pt" ;;
     *) echo "[ERROR] ROBOT_TYPE must be go2 or b2w" >&2; exit 2 ;;
 esac
 POLICY_PATH="${POLICY_PATH:-${DEFAULT_LOCOMOTION_POLICY}}"
-POLICY_CONFIG="${POLICY_CONFIG:-checkpoints/moe_cts_lab/config.yaml}"
+POLICY_CONFIG="${POLICY_CONFIG:-checkpoints/go2/moe_cts/export/config.yaml}"
 CONTROLLER_ARGS=(--controller "${CONTROLLER}" --policy_path "${POLICY_PATH}" --policy_config "${POLICY_CONFIG}")
 CONTROLLER_ARGS+=(--velocity_log_interval "${VELOCITY_LOG_INTERVAL:-5.0}")
 case "${TERRAIN_SPEED_LIMIT:-0}" in

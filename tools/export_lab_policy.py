@@ -51,8 +51,8 @@ def linear_shapes(state, prefix):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source', type=Path, default=ROOT / 'go2_rl_lab')
-    parser.add_argument('--checkpoint', type=Path, default=ROOT / 'checkpoints/moe_cts_lab.pt')
-    parser.add_argument('--output', type=Path, default=ROOT / 'checkpoints/moe_cts_lab')
+    parser.add_argument('--checkpoint', type=Path, default=ROOT / 'checkpoints/go2/moe_cts/source/moe_cts_lab.pt')
+    parser.add_argument('--output', type=Path, default=ROOT / 'checkpoints/go2/moe_cts/export')
     args = parser.parse_args()
     source, checkpoint = args.source.resolve(), args.checkpoint.resolve()
     rsl = source / 'source/rsl_rl/rsl_rl'

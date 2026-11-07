@@ -404,8 +404,6 @@ class G1RoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         super().__post_init__()
         # Scene
         G1_MINIMAL_CFG = G1_CFG.copy()
-        repo_root = os.path.dirname(os.path.dirname(__file__))
-        G1_MINIMAL_CFG.spawn.usd_path = os.path.join(repo_root, "assets", "robots", "g1", "g1.usd")
         self.scene.robot = G1_MINIMAL_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/torso_link"
 

@@ -21,6 +21,8 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+from pathlib import Path
+
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
@@ -28,7 +30,7 @@ from isaaclab.assets import ArticulationCfg
 
 G1_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
-        usd_path="./assets/robots/g1/g1.usd",
+        usd_path=str(Path(__file__).resolve().parent / "g1.usd"),
         activate_contact_sensors=True,
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=False,

@@ -1,19 +1,31 @@
 # go2_omniverse
 
-基于 Isaac Sim / Isaac Lab 的机器人仿真工程，提供 Go2 运动控制、场景资产、RGB-D / 双目传感器和 ROS2 接口。与 [thermalnav_demo](https://github.com/L-Anjing/thermalnav_demo) 配合，可运行灰度双目稀疏深度、Depth 融合建图和主动探索。
+面向四足、轮足、人形等多形态机器人的 Isaac Sim / Isaac Lab 仿真工程，集中管理机器人资产、场景、仿真传感器、底层运动策略和 ROS2 接口。当前统一运行入口提供 Go2 与 B2W 适配，仓库还保留 G1 人形机器人、Crazyflie 的资产和配置。
+
+导航、SRU、建图与部署应用由独立工程通过 ROS2 接入。例如 [thermalnav_demo](https://github.com/L-Anjing/thermalnav_demo) 提供灰度双目稀疏深度、Depth 融合建图和主动探索。
 
 ## 1. Pipeline 与功能
 
 ```mermaid
 flowchart LR
-    A[Isaac 场景与 Go2] --> B[D455f 参考 Depth<br/>TWIN612 参考双目 RGB]
-    B --> C[ThermalNav C++<br/>灰度匹配 / 深度融合 / BEV]
-    C --> D[探索目标 / PointGoal] --> E[外部 SRU] --> F[cmd_vel]
-    F --> G[Lab MoE-CTS<br/>关节控制] --> A
-    A --> H[原 front_cam Depth] --> E
+    A[共享 Isaac 场景] --> B[机器人适配<br/>Go2 / B2W / 人形等]
+    B --> C[传感器与 ROS2<br/>RGB / Depth / Odom / TF]
+    C --> D[外部建图与导航工程] --> E[cmd_vel / 控制接口]
+    E --> F[机器人底层运动策略] --> B
 ```
 
-本仓库运行仿真、传感器和底层运动策略；双目估计、占据融合和目标选择由外部 C++ `thermalnav_demo` 运行，SRU 负责 PointGoal 到速度指令的导航。原有 SRU 相机和控制接口保持独立。
+本仓库负责仿真侧运行与机器人适配；底层策略在仿真中的推理属于机器人运动控制。导航模型推理、任务评测和实机部署归各自独立工程。双目估计、占据融合及目标选择在外部 C++ `thermalnav_demo` 中运行，SRU 在独立部署工程中将 PointGoal 转为速度指令。
+
+### 机器人适配状态
+
+| 机器人 | 当前实现 | 启动与边界 |
+| --- | --- | --- |
+| Go2 四足 | Lab MoE-CTS、RGB-D、语义与 LiDAR；可选独立双目建图传感器 | `ROBOT_TYPE=go2`，支持本文 Go2 建图示例 |
+| B2W 轮足 | 独立 60D 状态 / 16D 动作策略、RayCaster Depth、RTX RGB、跟随视角 | `ROBOT_TYPE=b2w`，当前统一入口限定 Hospital |
+| G1 人形 | `assets/robots/g1/` 资产与 `G1RoughEnvCfg`、agent 配置 | 尚未接入当前 `run_sim.sh` 的机器人选项 |
+| Crazyflie 与其他扩展 | `assets/robots/copter/` 等资产配置，按机器人适配层扩展 | 资产存在不等于完成运行入口与闭环验证 |
+
+Go2/B2W 每个进程选择一种机器人，`ROBOT_AMOUNT` 复制该类型；混合机器人同进程生成尚未接入。
 
 | 功能 | 使用方式 / 输出 |
 | --- | --- |
@@ -50,15 +62,15 @@ ln -sfn /absolute/path/to/IsaacSim-ros_workspaces IsaacSim-ros_workspaces
 test -d IsaacSim-ros_workspaces/humble_ws
 ```
 
-场景 USD、纹理和模型权重需在运行机器上准备齐全；`checkpoints/` 不随本仓库 Git 提交分发。
+场景 USD、纹理和模型权重需在运行机器上准备齐全；权重由 `checkpoints/.gitignore` 忽略，目录说明随 Git 分发。资产与权重的目录约定、本机清单及归并方法见 [资产管理](assets/README.md) 和 [权重管理](checkpoints/README.md)。
 
 | 路径 | 所需内容 |
 | --- | --- |
 | `assets/env/big_scene/hospital/hospital_navigation.usda` | Hospital 场景及其引用资产 |
 | `assets/env/big_scene/warehouse/warehouse_navigation.usda` | Warehouse 场景及其引用资产 |
 | `assets/env/big_scene/office/office_navigation.usda` | Office 场景及其引用资产 |
-| `checkpoints/moe_cts_lab/policy.pt` | 导出的 Go2 TorchScript student |
-| `checkpoints/moe_cts_lab/config.yaml` | 与该策略配套的部署配置 |
+| `checkpoints/go2/moe_cts/export/policy.pt` | 导出的 Go2 TorchScript student |
+| `checkpoints/go2/moe_cts/export/config.yaml` | 与该策略配套的部署配置 |
 
 换机器时设置资产根目录和环境名；脚本默认选择物理 GPU 1，单卡机器通常设为 0：
 
@@ -91,14 +103,14 @@ source go2_omniverse_ws/install/setup.bash
 
 ### 2.3 准备运动策略
 
-已有 `policy.pt` 和配套配置时可直接启动。需要从原始权重重新导出时，准备 `checkpoints/moe_cts_lab.pt` 与匹配的 `go2_rl_lab` 源码，在部署 Conda 环境执行：
+已有 `policy.pt` 和配套配置时可直接启动。需要从原始权重重新导出时，准备 `checkpoints/go2/moe_cts/source/moe_cts_lab.pt` 与匹配的 `go2_rl_lab` 源码，在部署 Conda 环境执行：
 
 ```bash
 conda activate env_isaaclab
 PYTHONNOUSERSITE=1 python tools/export_lab_policy.py
 ```
 
-默认输出至 `checkpoints/moe_cts_lab/`；启动时可用 `POLICY_PATH`、`POLICY_CONFIG` 指定其他兼容导出。Go2 使用 45D 单帧观测、10 帧历史、12D 关节动作和 20 ms 控制周期。
+默认输出至 `checkpoints/go2/moe_cts/export/`；启动时可用 `POLICY_PATH`、`POLICY_CONFIG` 指定其他兼容导出。Go2 使用 45D 单帧观测、10 帧历史、12D 关节动作和 20 ms 控制周期。
 
 ### 2.4 离线配置检查
 
@@ -111,13 +123,21 @@ bash -n commands/run_sim.sh
 
 ## 3. 使用说明
 
-### 3.1 启动 Go2 仿真
+### 3.1 启动机器人仿真
 
 默认启动单台 Go2、Hospital 场景、Lab 控制器和 ROS2 速度输入：
 
 ```bash
-bash commands/run_sim.sh
+ROBOT_TYPE=go2 bash commands/run_sim.sh
 ```
+
+B2W 使用相同仿真入口：
+
+```bash
+ROBOT_TYPE=b2w CUSTOM_ENV=hospital bash commands/run_sim.sh
+```
+
+B2W 资产 `assets/robots/b2w/b2w_rsl.usd` 和运动权重 `checkpoints/b2w/locomotion/policy_b2w_new_2.pt` 需在运行机器准备。其 ROS2 命名空间为 `/b2w0`，使用 `/clock` 与仿真时间；传感器内参与 Go2 不同，详见 [B2W 仿真接口](docs/ROBOT_SIM_LOCAL.md)。
 
 无界面运行并复用 ROS2 构建结果：
 
@@ -139,6 +159,8 @@ CUSTOM_ENV=hospital bash commands/run_sim.sh
 | `VELOCITY_LOG_INTERVAL` | `5` | 速度日志墙钟间隔，单位秒；`0` 关闭周期日志 |
 
 ### 3.2 启用 D455f / TWIN612 参考相机
+
+本节及后续融合示例针对 **Go2**。B2W 使用自己的相机配置；G1 等机器人接入时需单独配置安装位姿、话题及控制策略。
 
 ```bash
 STEREO_RGB=1 CAMERA_RIG=d455f_twin612 \
@@ -252,11 +274,15 @@ go2_omniverse/
 │   ├── ros2.py                   # ROS2 节点、传感器和 TF
 │   ├── omnigraph.py              # 图像、深度、标定和语义发布图
 │   ├── camera_extrinsic.py       # 相机内外参、双目基线和几何配置
+│   ├── robot_profiles.py         # 机器人类型、命名空间和接口配置
 │   ├── lab_policy.py             # Go2 Lab student 推理和历史管理
+│   ├── b2w_policy.py             # B2W 轮足运动策略
+│   ├── b2w_*camera.py            # B2W RGB 与跟随视角
 │   └── terrain_*.py / usd_terrain.py  # 地形查询与速度调节
 ├── configs/                      # 机器人部署、相机、地形配置
-├── assets/                       # 机器人、场景 USD 与引用资产
-├── checkpoints/                  # 本地模型和导出配置（Git 忽略）
+├── assets/robots/                # b2w / g1 / copter 的模型与配置
+├── assets/env/                   # 共享场景 USD 与引用资产
+├── checkpoints/<机器人>/<策略>/  # 运动权重和导出配置（内容 Git 忽略）
 ├── go2_omniverse_ws/              # 自定义 ROS2 消息包 go2_interfaces
 ├── IsaacSim-ros_workspaces/       # Isaac ROS2 依赖工作空间
 ├── go2_rl_lab/                   # 策略导出与训练所需上游源码
@@ -265,6 +291,8 @@ go2_omniverse/
 └── docs/                         # 控制器与机器人接口补充说明
 ```
 
-`thermalnav_demo` 和 `sru-robot-deployment` 是同级独立工程，通过 ROS2 与仿真通信。本仓库的启动脚本只启动仿真；导航节点由外部部署入口管理。
+`thermalnav_demo` 和 `sru-robot-deployment` 是独立工程，通过 ROS2 与仿真通信。本仓库的启动脚本只启动仿真；导航节点、SRU 评测与实机应用由外部部署入口管理。
+
+新增机器人时，在 `assets/robots/<类型>/` 准备资产，配置对应关节 / 执行器与运动策略，再接入机器人类型选择、ROS2 命名空间、传感器及 TF。需要分别验证模型加载、站立 / 行走、相机几何和外部控制链路。
 
 更多接口与参数见 [机器人与 B2W 使用说明](docs/ROBOT_SIM_LOCAL.md)、[地形限速说明](docs/terrain_speed.md) 和 [Lab 部署细节](docs/lab_controller.md)。

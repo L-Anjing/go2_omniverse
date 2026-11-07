@@ -67,7 +67,7 @@ parser.add_argument('--stereo_rgb', action='store_true', help='Add a right RGB e
 parser.add_argument('--terrain_speed_limit', action='store_true', help='Enable USD terrain-aware command limits')
 parser.add_argument('--terrain_speed_config', default='configs/terrain_speed.yaml')
 parser.add_argument('--policy_path', type=str, default=None)
-parser.add_argument('--policy_config', type=str, default='checkpoints/moe_cts_lab/config.yaml')
+parser.add_argument('--policy_config', type=str, default='checkpoints/go2/moe_cts/export/config.yaml')
 parser.add_argument('--max_velocity_command', type=float, nargs=3, default=None,
                     metavar=('VX', 'VY', 'WZ'), help='Lab body-frame command limits; default from export config')
 parser.add_argument('--max_steps', type=int, default=0, help='Stop after N simulation control steps (0: unlimited)')
@@ -121,8 +121,8 @@ if not math.isfinite(args_cli.velocity_log_interval) or args_cli.velocity_log_in
     parser.error('--velocity_log_interval must be finite and nonnegative')
 args_cli.robot = args_cli.robot_type
 args_cli.policy_path = args_cli.policy_path or (
-    'checkpoints/b2w/policy_b2w_new_2.pt' if args_cli.robot_type == 'b2w'
-    else 'checkpoints/moe_cts_lab/policy.pt'
+    'checkpoints/b2w/locomotion/policy_b2w_new_2.pt' if args_cli.robot_type == 'b2w'
+    else 'checkpoints/go2/moe_cts/export/policy.pt'
 )
 os.environ['SIM_ROBOT_TYPE'] = args_cli.robot_type
 os.environ['SIM_COMMAND_SOURCE'] = args_cli.cmd_source

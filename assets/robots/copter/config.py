@@ -21,6 +21,8 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+from pathlib import Path
+
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
@@ -29,7 +31,7 @@ from isaaclab.assets import ArticulationCfg
 CRAZYFLIE_CFG = ArticulationCfg(
     prim_path="{ENV_REGEX_NS}/Robot",
     spawn=sim_utils.UsdFileCfg(
-        usd_path="./assets/robots/copter/cf2x.usd",
+        usd_path=str(Path(__file__).resolve().parent / "cf2x.usd"),
         rigid_props=sim_utils.RigidBodyPropertiesCfg(
             disable_gravity=True,
             max_depenetration_velocity=10.0,

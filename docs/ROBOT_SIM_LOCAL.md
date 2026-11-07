@@ -83,7 +83,7 @@ Copied from the training assets into this repository:
 
 - `assets/robots/b2w/b2w_rsl.usd`
 - `assets/robots/b2w/config.py` (original articulation/actuator settings)
-- `checkpoints/b2w/policy_b2w_new_2.pt`
+- `checkpoints/b2w/locomotion/policy_b2w_new_2.pt`
 
 `configs/b2w_deploy.py` constructs exactly the 60-feature locomotion input:
 linear velocity, angular velocity, gravity, requested body velocity,
@@ -93,11 +93,10 @@ through position scale 0.5 and wheel velocity scale 5.0 at 50 Hz.
 The model's recurrence is reset for environment resets.
 This model is not the SRU navigation checkpoint and receives no depth/goal.
 
-The production entry imports no training checkout or `sru_eval` modules.
-The pre-existing `sru_eval/` source is preserved without this task's experiment
-changes, and is not the supported runtime. The temporary comparison script
-and helper modules were removed. `run_sru_b2w_hospital.sh` is retained only as
-a compatibility alias to the simulator-only B2W entry; it starts no navigation.
+The production entry runs simulation and locomotion only. Navigation policy
+inference, SRU evaluation and robot deployment belong to separate projects
+connected through ROS2. `run_sru_b2w_hospital.sh` is retained only as a
+compatibility alias to the simulator-only B2W entry; it starts no navigation.
 
 ## Scene differences corrected
 
