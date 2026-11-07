@@ -112,6 +112,12 @@ if [ -n "${MAX_VELOCITY_COMMAND:-}" ]; then
     fi
     CONTROLLER_ARGS+=(--max_velocity_command "${VELOCITY_LIMITS[@]}")
 fi
+export CAMERA_RIG="${CAMERA_RIG:-legacy}"
+case "${STEREO_RGB:-0}" in
+    1|true|True) CONTROLLER_ARGS+=(--stereo_rgb) ;;
+    0|false|False) ;;
+    *) echo '[ERROR] STEREO_RGB must be 0 or 1' >&2; exit 2 ;;
+esac
 CMD_SOURCE="${CMD_SOURCE:-ros2}"
 RENDERING_MODE="${RENDERING_MODE:-quality}"
 HEADLESS="${HEADLESS:-0}"
@@ -125,7 +131,7 @@ echo "[INFO] Simulation robot: ${ROBOT_TYPE} (locomotion only)"
 echo "[INFO] Policy: ${POLICY_PATH}"
 echo "[INFO] Terrain speed limiter: ${TERRAIN_SPEED_LIMIT:-0}"
 echo "[INFO] Rendering mode: ${RENDERING_MODE}"
-echo "[INFO] Camera: front_cam"
+echo "[INFO] Camera: front_cam, stereo RGB=${STEREO_RGB:-0}, baseline=${STEREO_BASELINE:-config} m"
 echo "[INFO] Headless: ${HEADLESS}"
 echo "[INFO] Custom environment: ${CUSTOM_ENV}"
 echo "[INFO] Robot environments: ${ROBOT_AMOUNT}"

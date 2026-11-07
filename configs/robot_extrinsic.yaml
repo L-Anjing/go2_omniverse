@@ -16,3 +16,22 @@ robot_extrinsic:
   #                    -1.0,  0.0,           0.0,
   #                     0.0, -0.9848077530, -0.1736481777]
   # camera_to_robot_T: [0.32487, -0.00095, 0.25362]
+
+# Optional RGB stereo pair. front_cam retains its original SRU pose.
+stereo_rgb:
+  enabled: false
+  baseline_m: 0.12
+
+# Hardware-reference mapping branch. Mounts and thermal baseline
+# are SIMULATION ASSUMPTIONS until the two TWIN612 units are mounted/calibrated. The user selected 25mm lenses.
+# D455f reference: HD depth 87x58 deg, 0.6-6m; internal IR baseline is 95mm.
+# TWIN612 reference: 640x512, 12um pixels, 25/30Hz; no stereo baseline is specified.
+mapping_rig:
+  thermal_lens_mm: 25.0
+  thermal_left_offset_m: [0.0, 0.0, 0.10]
+  depth_offset_m: [0.0, 0.0, 0.0]
+  d455f_internal_baseline_m: 0.095
+  sources:
+    d455f: https://www.realsenseai.com/products/d455f/
+    d455f_datasheet: https://www.intelrealsense.com/wp-content/uploads/2024/10/Intel-RealSense-D400-Series-Datasheet-October-2024.pdf
+    twin612: https://www.gst-ir.com/products-ir-module/twin/TWIN612.html

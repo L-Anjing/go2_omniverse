@@ -1,70 +1,234 @@
 # go2_omniverse
 
-Isaac Lab / Isaac Sim 中的 Unitree Go2 仿真、传感器发布和大场景语义资产。
+基于 Isaac Sim / Isaac Lab 的机器人仿真工程，提供 Go2 运动控制、场景资产、RGB-D / 双目传感器和 ROS2 接口。与 [thermalnav_demo](https://github.com/L-Anjing/thermalnav_demo) 配合，可运行灰度双目稀疏深度、Depth 融合建图和主动探索。
 
-## 环境准备
+## 1. Pipeline 与功能
 
-```bash
-source /opt/ros/humble/setup.bash
-conda activate env_isaaclab
-cd /media/user/data1/carl/workspace/go2_omniverse
+```mermaid
+flowchart LR
+    A[Isaac 场景与 Go2] --> B[D455f 参考 Depth<br/>TWIN612 参考双目 RGB]
+    B --> C[ThermalNav C++<br/>灰度匹配 / 深度融合 / BEV]
+    C --> D[探索目标 / PointGoal] --> E[外部 SRU] --> F[cmd_vel]
+    F --> G[Lab MoE-CTS<br/>关节控制] --> A
+    A --> H[原 front_cam Depth] --> E
 ```
 
-首次运行 `commands/run_sim.sh` 会编译并 source：
+本仓库运行仿真、传感器和底层运动策略；双目估计、占据融合和目标选择由外部 C++ `thermalnav_demo` 运行，SRU 负责 PointGoal 到速度指令的导航。原有 SRU 相机和控制接口保持独立。
 
-- `IsaacSim-ros_workspaces/humble_ws`
-- `go2_omniverse_ws`
+| 功能 | 使用方式 / 输出 |
+| --- | --- |
+| Go2 运动仿真 | Lab MoE-CTS student，接收机体系 `[vx, vy, wz]` |
+| 大场景 | Hospital、Warehouse、Office 的 navigation USD 资产 |
+| 原前置相机 | RGB、Depth、CameraInfo、语义分割，供现有链路使用 |
+| 双目建图传感器 | 可选独立 D455f 参考 Depth 与两只 TWIN612 几何参考 RGB 相机 |
+| ROS2 桥接 | 图像、里程计、IMU、LiDAR、TF 和速度控制 |
+| 地形速度调节 | 可选 USD 地形限速器，沿用同一个运动策略 |
 
-`run_sim.sh` 会设置 `PYTHONNOUSERSITE=1`，确保 IsaacLab 使用
-`env_isaaclab` 内匹配的 PyTorch/torchvision。不要让 `~/.local` 中其他 CUDA 或
-PyTorch 版本覆盖该环境；启动时脚本会打印两个包的版本和实际路径。
+双目目前使用 RGB 转灰度作为热红外代理，模拟相机几何；热辐射成像和真实热红外噪声不在此代理模型中。
 
-也可以预先构建后设置 `SKIP_ROS_BUILD=true`。换机器时重点检查：
+## 2. 环境与构建
+
+### 2.1 运行环境
+
+使用服务器上已有、相互兼容的 Isaac Sim 4.5 / Isaac Lab 环境，以及 ROS2 Humble、Conda 和 NVIDIA GPU。默认 Conda 环境为 `env_isaaclab`，脚本会打印实际 Python、PyTorch、torchvision 路径。
+
+以下示例在 `~/nav_ws` 下组织仓库；服务器已有其他位置时切换到实际仓库目录。
+
+```bash
+cd ~/nav_ws/go2_omniverse
+source /opt/ros/humble/setup.bash
+
+# 已有依赖目录时无需重复初始化。
+git submodule update --init --recursive go2_rl_lab
+```
+
+`IsaacSim-ros_workspaces` 在本仓库中是指向服务器已有依赖目录的符号链接。请准备与 Isaac Sim 4.5 配套的 [Isaac ROS2 工作空间](https://github.com/NVIDIA-Omniverse/IsaacSim-ros_workspaces)，并按实际位置调整链接，确保下列检查成功：
+
+```bash
+# 新机器按实际依赖路径调整；已有有效链接时无需执行 ln。
+ln -sfn /absolute/path/to/IsaacSim-ros_workspaces IsaacSim-ros_workspaces
+test -d IsaacSim-ros_workspaces/humble_ws
+```
+
+场景 USD、纹理和模型权重需在运行机器上准备齐全；`checkpoints/` 不随本仓库 Git 提交分发。
+
+| 路径 | 所需内容 |
+| --- | --- |
+| `assets/env/big_scene/hospital/hospital_navigation.usda` | Hospital 场景及其引用资产 |
+| `assets/env/big_scene/warehouse/warehouse_navigation.usda` | Warehouse 场景及其引用资产 |
+| `assets/env/big_scene/office/office_navigation.usda` | Office 场景及其引用资产 |
+| `checkpoints/moe_cts_lab/policy.pt` | 导出的 Go2 TorchScript student |
+| `checkpoints/moe_cts_lab/config.yaml` | 与该策略配套的部署配置 |
+
+换机器时设置资产根目录和环境名；脚本默认选择物理 GPU 1，单卡机器通常设为 0：
 
 ```bash
 export ISAAC_ASSETS_ROOT=/absolute/path/to/Assets/Isaac/4.5
 export CONDA_ENV_NAME=env_isaaclab
+export CUDA_VISIBLE_DEVICES=0
 ```
 
-## 启动仿真
+脚本设置 `PYTHONNOUSERSITE=1`，使用 Conda 环境内的 PyTorch / torchvision。
 
-运行时固定使用 MoE-CTS 和单个 `front_cam`。推荐使用 ROS2 控制、RGB-D 和 labeled Hospital 场景：
+### 2.2 构建 ROS2 工作空间
+
+首次执行 `bash commands/run_sim.sh` 会自动依次构建并加载：
+
+1. `IsaacSim-ros_workspaces/humble_ws`
+2. `go2_omniverse_ws`
+
+也可单独构建，先在已配置 ROS2 Humble 和 colcon 的终端执行：
 
 ```bash
-cd /media/user/data1/carl/workspace/go2_omniverse
-CMD_SOURCE=ros2 CONTROLLER=lab  \
- ./commands/run_sim.sh
+source /opt/ros/humble/setup.bash
+(cd IsaacSim-ros_workspaces/humble_ws && colcon build)
+source IsaacSim-ros_workspaces/humble_ws/install/setup.bash
+(cd go2_omniverse_ws && colcon build)
+source go2_omniverse_ws/install/setup.bash
 ```
 
-headless 模式：
+两者已构建后，启动时设置 `SKIP_ROS_BUILD=true` 可复用安装结果。
+
+### 2.3 准备运动策略
+
+已有 `policy.pt` 和配套配置时可直接启动。需要从原始权重重新导出时，准备 `checkpoints/moe_cts_lab.pt` 与匹配的 `go2_rl_lab` 源码，在部署 Conda 环境执行：
 
 ```bash
-HEADLESS=1 CMD_SOURCE=ros2 \
-CUSTOM_ENV=hospital ./commands/run_sim.sh
+conda activate env_isaaclab
+PYTHONNOUSERSITE=1 python tools/export_lab_policy.py
 ```
 
-默认参数包括 `CONTROLLER=lab`、`CUSTOM_ENV=hospital`、`CMD_SOURCE=ros2`。
-启动时打印实际场景、传感器、policy 路径与地形限速开关。当前只支持 Lab student，
-相机固定为单个 `front_cam`。
+默认输出至 `checkpoints/moe_cts_lab/`；启动时可用 `POLICY_PATH`、`POLICY_CONFIG` 指定其他兼容导出。Go2 使用 45D 单帧观测、10 帧历史、12D 关节动作和 20 ms 控制周期。
 
-## Big scene 资产
+### 2.4 离线配置检查
 
-当前大场景位于 `assets/env/big_scene/`：
-
-```text
-hospital/hospital_base.usd
-hospital/hospital_navigation.usda
-office/office_base.usd
-office/office_navigation.usda
-warehouse/warehouse_base.usd
-warehouse/warehouse_navigation.usda
+```bash
+python3 -m unittest discover -s tests -p test_stereo_camera.py -v
+bash -n commands/run_sim.sh
 ```
 
-Hospital 和 warehouse 的正式运行路径由 `core/omniverse_sim.py` 固定到 labeled
-`*_navigation.usda`，防止采集时误加载未标注资产。open-door 变体用于离线资产处理和
-验证，不能绕过正式 profile 的路径检查。
+该测试检查相机配置、双目基线、TF 几何及发布图契约；实际渲染和闭环导航需在 Isaac 环境验证。C++ 构建和融合测试见 [ThermalNav 使用说明](https://github.com/L-Anjing/thermalnav_demo#使用说明)。
 
-离线生成 Hospital 语义与开门 overlay：
+## 3. 使用说明
+
+### 3.1 启动 Go2 仿真
+
+默认启动单台 Go2、Hospital 场景、Lab 控制器和 ROS2 速度输入：
+
+```bash
+bash commands/run_sim.sh
+```
+
+无界面运行并复用 ROS2 构建结果：
+
+```bash
+HEADLESS=1 SKIP_ROS_BUILD=true CMD_SOURCE=ros2 \
+CUSTOM_ENV=hospital bash commands/run_sim.sh
+```
+
+| 环境变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `ROBOT_TYPE` | `go2` | 仿真机器人；另有 `b2w`，接口见架构说明中的链接 |
+| `CUSTOM_ENV` | `hospital` | 场景，可选 `warehouse`、`office` |
+| `ROBOT_AMOUNT` | `1` | 同类型机器人数量，Go2 命名空间为 `robot0`、`robot1` 等 |
+| `CONTROLLER` | `lab` | Go2 Lab student 控制器 |
+| `CMD_SOURCE` | `ros2` | 使用 ROS2 速度指令 |
+| `HEADLESS` | `0` | 设为 `1` 关闭窗口 |
+| `SKIP_ROS_BUILD` | `false` | 设为 `true` 跳过重建，加载已有安装 |
+| `MAX_STEPS` | 未设置 | 可选有限步数运行 |
+| `VELOCITY_LOG_INTERVAL` | `5` | 速度日志墙钟间隔，单位秒；`0` 关闭周期日志 |
+
+### 3.2 启用 D455f / TWIN612 参考相机
+
+```bash
+STEREO_RGB=1 CAMERA_RIG=d455f_twin612 \
+bash commands/run_sim.sh
+```
+
+| 传感器 | 仿真设置 | 主要话题前缀 |
+| --- | --- | --- |
+| 原有 SRU 前置相机 | 保持原安装位姿与内参 | `/robot0/front_cam` |
+| D455f 参考 Depth | 87° × 58°、0.6–6 m；HD 几何以 640 × 360 渲染 | `/robot0/d455f_depth` |
+| 左右 TWIN612 RGB 灰度代理 | 640 × 512、12 μm 像元、25 mm 镜头 | `/robot0/twin612_left`、`/robot0/twin612_right` |
+
+热红外双目基线暂定 **120 mm**。镜头为已选 **25 mm**；基线和安装位置为仿真暂定值，实机安装后需标定。参数统一位于 [configs/robot_extrinsic.yaml](configs/robot_extrinsic.yaml)，也可覆盖：
+
+```bash
+STEREO_RGB=1 CAMERA_RIG=d455f_twin612 \
+STEREO_BASELINE=0.12 THERMAL_LENS_MM=25 \
+bash commands/run_sim.sh
+```
+
+`STEREO_BASELINE` 单位为米。渲染相机与静态 TF 共用同一外参配置，坐标关系为 `p_base = R_camera_to_base × p_camera + t_camera_to_base`；机体系 x 前、y 左、z 上，相机光学系 x 右、y 下、z 前。修改后重启仿真。
+
+如需沿用原前置相机作为左目，只增加右目：
+
+```bash
+STEREO_RGB=1 CAMERA_RIG=legacy bash commands/run_sim.sh
+```
+
+### 3.3 运行 C++ 融合与探索
+
+仿真保持运行，在另一个终端执行：
+
+```bash
+cd ~/nav_ws/thermalnav_demo
+bash run_demo.sh build
+CAMERA_RIG=d455f_twin612 MAPPING_SOURCE=fused bash run_demo.sh observe
+```
+
+随后在其他终端执行：
+
+```bash
+cd ~/nav_ws/thermalnav_demo
+bash run_demo.sh rviz
+# 开始探索 / 查看状态 / 停止
+bash run_demo.sh start
+bash run_demo.sh status
+bash run_demo.sh stop
+```
+
+`observe` 先观测建图，`start` 开启探索；`MAPPING_SOURCE` 支持 `depth_only`、`stereo_only`、`fused`。两端 `CAMERA_RIG` 应一致。Go2 链路保持 `use_sim_time=false`。
+
+评测稀疏深度时，仿真启动命令额外设置 `CAMERA_EVAL_GT=1`，再运行：
+
+```bash
+CAMERA_RIG=d455f_twin612 bash run_demo.sh evaluate
+```
+
+该开关发布 `/robot0/twin612_left/depth_reference`，仅供独立评测使用。普通融合使用左右 RGB 估计稀疏深度。
+
+### 3.4 ROS2 接口与手动控制
+
+| 接口 | 话题 |
+| --- | --- |
+| 速度输入 `Twist` | `/robot0/cmd_vel` |
+| 位姿、惯性和 LiDAR | `/robot0/odom`、`/robot0/imu`、`/robot0/point_cloud2_L1` |
+| 原前置 RGB-D | `/robot0/front_cam/rgb`、`depth`、`camera_info` |
+| 原前置语义 | `/robot0/front_cam/semantic_segmentation`、`semantic_segmentation_labels` |
+| 独立建图 Depth | `/robot0/d455f_depth/depth`、`camera_info` |
+| 独立双目 RGB | `/robot0/twin612_left/rgb`、`camera_info`；右目对应 `twin612_right` |
+| 指令诊断 `TwistStamped` | `/robot0/requested_command`、`/robot0/controller_command` |
+
+表中同一前缀下省略的名称均为该前缀的子话题。原 `front_cam/depth` 始终发布。手动控制时停止其他速度发送端，再运行：
+
+```bash
+ros2 run teleop_twist_keyboard teleop_twist_keyboard \
+  --ros-args -r cmd_vel:=/robot0/cmd_vel
+```
+
+### 3.5 地形、摩擦与场景配置
+
+```bash
+TERRAIN_SPEED_LIMIT=1 bash commands/run_sim.sh
+
+GROUND_STATIC_FRICTION=0.9 GROUND_DYNAMIC_FRICTION=0.8 \
+TERRAIN_SPEED_LIMIT=1 bash commands/run_sim.sh
+```
+
+地形限速默认关闭；配置位于 [configs/terrain_speed.yaml](configs/terrain_speed.yaml)，可通过 `TERRAIN_SPEED_CONFIG` 切换。它在底层运动策略之前调节速度请求；地形配置值属于仿真参数。地面摩擦默认静摩擦 `0.9`、动摩擦 `0.8`，要求 `0 ≤ 动摩擦 ≤ 静摩擦`。
+
+场景使用 `assets/env/big_scene/<场景>/<场景>_navigation.usda` 及其引用资产。Hospital / Warehouse 正式入口检查对应标注资产。生成 Hospital 导航 overlay：
 
 ```bash
 python tools/usd_scene_pipeline.py navigation-overlay \
@@ -74,169 +238,33 @@ python tools/usd_scene_pipeline.py navigation-overlay \
   --open-doors --all-semantics
 ```
 
-## 语义标注约定
+语义标注施加到实际渲染 Mesh：地面为 `floor`，踏步为 `stairs`，墙体与栏杆为 `wall`，标志为 `sign`。`--open-doors` 停用门板并保留门框。
 
-语义必须在 USD source / composed runtime stage 的实际 rendered Mesh 上生效：
-
-| 对象 | USD semanticData | 对应语义类别 |
-|---|---|---|
-| floor / corridor / upper-floor support surface | `floor` | `navigable` |
-| stair tread / step / stair landing | `stairs` | `terrain_transition` |
-| railing / handrail / guardrail / fence | `wall` | `structure` |
-| wall / door panel / door frame / jamb | `wall` | `structure` |
-| ceiling | `ceiling` 或拆分楼板的 `wall` | `structure` |
-| warning sign | `sign` | `sign` |
-
-当前 `--open-doors` overlay 将识别到的 door panel 设为 inactive；门框保持 `wall`。
-门洞后方实际可见的 floor 才是 `navigable`。楼梯踏步与栏杆应是独立 Prim/Mesh，不能在 stair root 上统一
-覆盖所有子项，也不能用 traversability、depth、normal 或 morphology 后处理掩盖源头
-语义错误。
-
-## ROS2 话题
-
-控制输入：
+## 4. 工程架构
 
 ```text
-/robot0/cmd_vel
+go2_omniverse/
+├── main.py                       # 仿真入口
+├── commands/                     # 启动、训练转发及兼容入口
+│   └── run_sim.sh                # ROS2 构建、环境加载、仿真启动
+├── core/
+│   ├── omniverse_sim.py          # 场景、机器人、仿真主循环
+│   ├── ros2.py                   # ROS2 节点、传感器和 TF
+│   ├── omnigraph.py              # 图像、深度、标定和语义发布图
+│   ├── camera_extrinsic.py       # 相机内外参、双目基线和几何配置
+│   ├── lab_policy.py             # Go2 Lab student 推理和历史管理
+│   └── terrain_*.py / usd_terrain.py  # 地形查询与速度调节
+├── configs/                      # 机器人部署、相机、地形配置
+├── assets/                       # 机器人、场景 USD 与引用资产
+├── checkpoints/                  # 本地模型和导出配置（Git 忽略）
+├── go2_omniverse_ws/              # 自定义 ROS2 消息包 go2_interfaces
+├── IsaacSim-ros_workspaces/       # Isaac ROS2 依赖工作空间
+├── go2_rl_lab/                   # 策略导出与训练所需上游源码
+├── tools/                        # 权重导出、场景标注与资产处理
+├── tests/test_stereo_camera.py   # 无 Isaac 运行时的相机配置测试
+└── docs/                         # 控制器与机器人接口补充说明
 ```
 
-主要传感器：
+`thermalnav_demo` 和 `sru-robot-deployment` 是同级独立工程，通过 ROS2 与仿真通信。本仓库的启动脚本只启动仿真；导航节点由外部部署入口管理。
 
-```text
-/robot0/odom
-/robot0/imu
-/robot0/point_cloud2_L1
-/robot0/front_cam/rgb
-/robot0/front_cam/depth
-/robot0/front_cam/camera_info
-/robot0/front_cam/semantic_segmentation
-/robot0/front_cam/semantic_segmentation_labels
-```
-
-`front_cam/depth` 始终发布，不提供关闭开关。
-
-## Front camera extrinsic
-
-相机安装外参统一在 [configs/robot_extrinsic.yaml](configs/robot_extrinsic.yaml) 中修改：
-
-```yaml
-# p^base = R_camera^base * p^camera + t_camera^base
-robot_extrinsic:
-  camera_to_robot_R: [ 0.0,  0.0,  1.0,
-                     -1.0,  0.0,  0.0,
-                      0.0, -1.0,  0.0]
-  camera_to_robot_T: [0.32487, -0.00095, 0.05362]
-```
-
-`R` 为 row-major 旋转矩阵，`T` 为相机光心在 base_link 中的位置，单位米。
-机体系 x 前、y 左、z 上；相机采用 ROS 光学坐标系 x 右、y 下、z 前。
-因此这里的矩阵不是相机外壳坐标系的姿态，也不是 base 点到 camera 点的变换。
-当前已恢复原始安装位置和水平朝向；此前的 **10° 下倾**配置完整保留在配置文件注释中。
-
-渲染相机 `CameraCfg` 和 `base_link -> front_cam` 静态 TF 从同一配置加载。
-修改配置后重启仿真即可；启动脚本无需添加参数，旧 `FRONT_CAM_EXTRINSIC`
-环境变量不再作为覆盖来源。
-
-
-键盘控制示例：
-
-```bash
-ros2 run teleop_twist_keyboard teleop_twist_keyboard \
-  --ros-args -r cmd_vel:=/robot0/cmd_vel
-```
-
-## Lab 控制器与权重
-
-当前只使用本地 `go2_rl_lab` 的 MoE-CTS student。旧 `go2_rl_gym` 子仓库、
-legacy 加载分支及旧训练实现已移除，`CONTROLLER=legacy` 不再支持。
-默认使用 Lab，原 `bash commands/run_sim.sh` 启动形式继续可用。
-
-原始权重为 `checkpoints/moe_cts_lab.pt`，更新后先导出：
-
-```bash
-python tools/export_lab_policy.py
-CONTROLLER=lab CMD_SOURCE=ros2 bash commands/run_sim.sh
-```
-
-导出到 `checkpoints/moe_cts_lab/policy.pt` 和配套 `config.yaml`，不覆盖原始权重。
-可通过 `POLICY_PATH`、`POLICY_CONFIG` 选择兼容导出。
-接口仍为机体系 `[vx,vy,wz]`；45D 单帧、10 帧 term-wise 历史、12D action、20ms 控制周期。
-地形信息不进入 policy observation，不改变 normalization、action scale 或关节 PD。
-
-训练入口 `commands/run_train_stairs.sh` 转发到 Lab 的 `go2-mixed-moe-cts` 任务，
-应在该仓库要求的独立训练环境使用；现有 Isaac Sim 4.5 部署环境不升级、不替换依赖。
-本次未执行训练。
-
-## USD Terrain-Aware Velocity Limiter
-
-启用底层地形限速器，无需新增 ROS2 节点：
-
-```bash
-CONTROLLER=lab TERRAIN_SPEED_LIMIT=1 bash commands/run_sim.sh
-
-# 明确关闭，保留 Lab 原有统一限幅行为
-TERRAIN_SPEED_LIMIT=0 bash commands/run_sim.sh
-```
-
-功能默认关闭。关闭时 Lab 默认速度上限仍为 ±`[1.0,1.0,1.5]`，
-可用 `MAX_VELOCITY_COMMAND="3.5 0.5 1.5"` 修改。
-启用时，未显式设置该变量则使用地形配置中的平地上限，避免继续被 1 m/s 截断；
-显式设置更低的全局上限仍然有效。不会将导航的低速请求自动放大。
-
-地面接触摩擦默认调整为静摩擦 `0.9`、动摩擦 `0.8`（默认地面原为 `0.5 / 0.5`）。
-Hospital、Warehouse 和自定义 USD 中已识别且可编辑的静态地板、楼梯、坡道同步应用该设置；
-启动日志 `[ground friction]` 会报告覆盖数量及无法单独覆盖的实例代理数量。
-设置只作用于本次仿真 Stage，不写回 USD 资产。可按需调整，例如：
-
-```bash
-GROUND_STATIC_FRICTION=0.9 GROUND_DYNAMIC_FRICTION=0.8 \
-CONTROLLER=lab TERRAIN_SPEED_LIMIT=1 bash commands/run_sim.sh
-```
-
-要求 `0 <= 动摩擦 <= 静摩擦`。该参数是地面接触摩擦，独立于关节摩擦和速度限幅；
-不会提高速度指令，也不保证实际速度一定增加。关闭地形限速器仍使用上述地面摩擦设置。
-
-地形限速参数集中在 [configs/terrain_speed.yaml](configs/terrain_speed.yaml)，
-可用 `TERRAIN_SPEED_CONFIG` 指定其他配置：
-
-| 参数 | 初始值 | 含义 |
-|---|---:|---|
-| flat_max_vx / flat_max_vy | 3.5 / 0.5 m/s | 已确认开阔平地的指令范围 |
-| stairs_max_vx / stairs_max_vy | 0.7 / 0.2 m/s | 楼梯及退出保持阶段的指令范围 |
-| unknown_max_vx / unknown_max_vy | 0.5 / 0.2 m/s | 地形、净空或位姿不可靠时的保守范围 |
-| max_yaw_rate | 1.5 rad/s | 角速度上限，与平移共用椭球预算 |
-| accel_limit / decel_limit | 1.0 / 2.0 m/s² | 指令幅值变化率参数 |
-| braking_decel_factor | 0.75 | 制动规划余量 |
-| brake_margin | 0.5 m | 制动距离余量 |
-| lookahead_min / lookahead_max | 1.0 / 8.0 m | 前瞻查询距离 |
-| terrain_state_hysteresis | 0.3 s | 清除楼梯/确认平地的保持时间 |
-
-以上是仿真调参值，不代表实体机器人安全极限。停止或更低速度请求、新发现的保守硬限幅
-优先于变化率平滑；限速器不负责路径规划或绕障，UNKNOWN 的低速也不意味着区域可安全通行。
-
-```text
-原始 vx、vy、wz → 地形限速器 → 同一个 Lab student → Go2 关节控制
-                   ↑
-          USD 静态碰撞几何、语义、世界位姿与实际速度
-```
-
-初始化时扫描当前 World 的有效静态碰撞几何，按支撑高度区分重叠楼层；
-包含实际仍参与物理的默认地面，不把“渲染隐藏”误当作“碰撞禁用”。
-普通 Mesh 按真实三角形覆盖查询；楼梯名称只作线索，不单独确认台阶。
-无可靠语义时，可利用多个共线、不同高度的水平踏面辅助确认。
-场景几何或语义变化使索引失效并重建，机器人正常运动不重扫整个场景。
-
-前瞻检查请求方向和实际残余运动方向，覆盖倒退、横移及转向后的运动；
-状态包括 `FLAT`、`APPROACHING_STAIRS`、`ON_STAIRS`、`LEAVING_STAIRS`、`UNKNOWN`。
-进入楼梯前减速，完全离开并满足滞回时间后再平滑恢复。
-不切换模型，不因地形变化重置 policy history，不修改 GeoXMobility/SRU。
-
-`[velocity robot0]` 将 request、limited、actual 与地形状态合并在同一行，默认每 **5 秒墙钟时间**输出一次。
-request/limited 是刚完成控制周期内 policy 使用的指令，actual 是该周期结束时的机体系实测速度；
-`t` 使用仿真秒。`VELOCITY_LOG_INTERVAL=10` 可进一步降低频率，设为 `0` 关闭周期日志。
-不再额外输出重复的 `[terrain robot0]` 周期日志；启动、重置和错误事件仍保留。
-仿真还以里程计相同时间戳发布 `/robot0/requested_command` 和 `/robot0/controller_command`
-（`TwistStamped`），用于区分原始请求与地形限幅后的实际下发指令。
-
-测试方法、实现边界与实测结果见 [地形限速说明](docs/terrain_speed.md)。
-初次 Lab 适配和不带地形限速器的历史结果见 [Lab 迁移记录](docs/lab_controller.md)。
+更多接口与参数见 [机器人与 B2W 使用说明](docs/ROBOT_SIM_LOCAL.md)、[地形限速说明](docs/terrain_speed.md) 和 [Lab 部署细节](docs/lab_controller.md)。

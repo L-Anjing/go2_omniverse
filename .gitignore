@@ -15,6 +15,7 @@ env
 .codewhale
 rsl_rl_cts/__pycache__
 /tmp
-/tests/
+/tests/*
+!/tests/test_stereo_camera.py
 /checkpoints/
 /assets/robots/b2w/*.usd

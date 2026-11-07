@@ -136,23 +136,38 @@ def attach_usd_to_sensor(sensor_path: str, usd_path: str, visible=True):
         prim = stage.GetPrimAtPath(path)
         prim.GetAttribute("visibility").Set("inherited")
 
-from core.camera_extrinsic import front_camera_pose
+from core.camera_extrinsic import front_camera_pose, front_camera_poses, camera_sensor_parameters
 
 
 def add_camera(num_envs):
-    """Create one front_cam IsaacLab sensor for each environment."""
-    position, rotation = front_camera_pose()
-    cam_configs = [("front_cam", position, rotation)]
+    """Create the unchanged front camera and optional parallel right RGB eye."""
+    cam_configs = front_camera_poses()
 
     for i in range(num_envs):
         for cam_name, pos, rot in cam_configs:
+            params = camera_sensor_parameters(cam_name)
+            if cam_name != 'front_cam':
+                # Auxiliary cameras are USD cameras consumed by the existing
+                # OmniGraph render product, avoiding an unused IsaacLab product.
+                import torch
+                from isaaclab.utils.math import convert_camera_frame_orientation_convention
+                orientation = convert_camera_frame_orientation_convention(
+                    torch.tensor([rot]), origin='ros', target='opengl')[0].tolist()
+                lens = sim_utils.PinholeCameraCfg(
+                    focal_length=params['focal_length'],
+                    horizontal_aperture=params['horizontal_aperture'],
+                    vertical_aperture=params['vertical_aperture'],
+                    clipping_range=(params['min_range'], params['max_range']))
+                path = f"/World/envs/env_{i}/Robot/base/{cam_name}"
+                lens.func(path, lens, translation=pos, orientation=tuple(orientation))
+                continue
             cameraCfg = CameraCfg(
                 prim_path=f"/World/envs/env_{i}/Robot/base/{cam_name}",
                 update_period=0.1,
                 # Reduced from 480 × 640 to match OmniGraph render product (640 × 360).
                 # 1280×720 @ ~5 Hz is too heavy for RTX; 640×360 cuts pixel count by 75%.
-                height=360,
-                width=640,
+                height=params['height'],
+                width=params['width'],
                 # Only "rgb" here. Isaac Sim 4.5 has a bug: adding "semantic_segmentation"
                 # to data_types forces the robot USD from instanceable → non-instanceable,
                 # which deletes collision prims mid-simulation and invalidates the PhysX
@@ -162,10 +177,11 @@ def add_camera(num_envs):
                 # pipeline and is completely independent of this IsaacLab data_types list.
                 data_types=["rgb"],
                 spawn=sim_utils.PinholeCameraCfg(
-                    focal_length=24.0,
+                    focal_length=params['focal_length'],
                     focus_distance=400.0,
-                    horizontal_aperture=20.955,
-                    clipping_range=(0.1, 30.0),
+                    horizontal_aperture=params['horizontal_aperture'],
+                    vertical_aperture=params['vertical_aperture'],
+                    clipping_range=(params['min_range'], params['max_range']),
                 ),
                 offset=CameraCfg.OffsetCfg(
                     pos=pos,
@@ -333,22 +349,23 @@ class RobotBaseNode(Node):
 
         # Broadcast the same configurable base-to-camera transform used by
         # CameraCfg so rendered data and ROS TF cannot diverge.
-        camera_position, camera_rotation = b2w_camera_pose() if robot_type() == "b2w" else front_camera_pose()
-        qw, qx, qy, qz = camera_rotation
+        poses = [('front_cam', *b2w_camera_pose())] if robot_type() == 'b2w' else front_camera_poses()
         static_tfs = []
         for i in range(num_envs):
-            cam_tf = TransformStamped()
-            cam_tf.header.stamp = self.get_clock().now().to_msg()
-            cam_tf.header.frame_id = f"{robot_namespace(i)}/base_link"
-            cam_tf.child_frame_id = f"{robot_namespace(i)}/front_cam"
-            cam_tf.transform.translation.x = camera_position[0]
-            cam_tf.transform.translation.y = camera_position[1]
-            cam_tf.transform.translation.z = camera_position[2]
-            cam_tf.transform.rotation.x = qx
-            cam_tf.transform.rotation.y = qy
-            cam_tf.transform.rotation.z = qz
-            cam_tf.transform.rotation.w = qw
-            static_tfs.append(cam_tf)
+            for name, camera_position, camera_rotation in poses:
+                qw, qx, qy, qz = camera_rotation
+                cam_tf = TransformStamped()
+                cam_tf.header.stamp = self.get_clock().now().to_msg()
+                cam_tf.header.frame_id = f"{robot_namespace(i)}/base_link"
+                cam_tf.child_frame_id = f"{robot_namespace(i)}/{name}"
+                cam_tf.transform.translation.x = camera_position[0]
+                cam_tf.transform.translation.y = camera_position[1]
+                cam_tf.transform.translation.z = camera_position[2]
+                cam_tf.transform.rotation.x = qx
+                cam_tf.transform.rotation.y = qy
+                cam_tf.transform.rotation.z = qz
+                cam_tf.transform.rotation.w = qw
+                static_tfs.append(cam_tf)
         self.static_broadcaster.sendTransform(static_tfs)
 
     def publish_b2w_depth(self, camera, index, stamp):

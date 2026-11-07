@@ -63,6 +63,7 @@ import threading
 parser = argparse.ArgumentParser(description="Deploy an RL agent with RSL-RL.")
 parser.add_argument('--robot_type', choices=('go2', 'b2w'), default='go2')
 parser.add_argument('--controller', choices=('lab',), default='lab')
+parser.add_argument('--stereo_rgb', action='store_true', help='Add a right RGB eye; front_cam and SRU depth remain unchanged')
 parser.add_argument('--terrain_speed_limit', action='store_true', help='Enable USD terrain-aware command limits')
 parser.add_argument('--terrain_speed_config', default='configs/terrain_speed.yaml')
 parser.add_argument('--policy_path', type=str, default=None)
@@ -114,6 +115,8 @@ cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
+if args_cli.stereo_rgb:
+    os.environ['STEREO_RGB'] = '1'
 if not math.isfinite(args_cli.velocity_log_interval) or args_cli.velocity_log_interval < 0:
     parser.error('--velocity_log_interval must be finite and nonnegative')
 args_cli.robot = args_cli.robot_type

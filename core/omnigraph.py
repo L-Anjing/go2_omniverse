@@ -35,10 +35,9 @@ def _build_graph_name(robot_num: int, cam_prim_name: str, stream: str) -> str:
     """Build a unique OmniGraph path for a camera stream.
 
     >>> _build_graph_name(0, "front_cam", "rgb")
-    '/ROS_front_cam0_rgb'
+    '/ROS_robot0_front_cam_rgb'
     """
-    short = cam_prim_name.split("_")[-1]
-    return f"/ROS_front_cam{robot_num}_{short}_{stream}"
+    return f"/ROS_robot{robot_num}_{cam_prim_name}_{stream}"
 
 
 def _create_one_camera_omnigraphs(
@@ -58,6 +57,8 @@ def _create_one_camera_omnigraphs(
     cam_prim_name : str
         Camera prim name. The supported sensor is ``"front_cam"``.
     """
+    from core.camera_extrinsic import camera_sensor_parameters
+    params = camera_sensor_parameters(cam_prim_name)
     keys = og.Controller.Keys
     camera_prim = f"/World/envs/env_{robot_num}/Robot/base/{cam_prim_name}"
 
@@ -83,8 +84,8 @@ def _create_one_camera_omnigraphs(
     set_values = [
         ("IsaacCreateRenderProduct.inputs:cameraPrim", camera_prim),
         ("IsaacCreateRenderProduct.inputs:enabled", True),
-        ("IsaacCreateRenderProduct.inputs:width", CAMERA_WIDTH),
-        ("IsaacCreateRenderProduct.inputs:height", CAMERA_HEIGHT),
+        ("IsaacCreateRenderProduct.inputs:width", params['width']),
+        ("IsaacCreateRenderProduct.inputs:height", params['height']),
         ("RGBPublisher.inputs:type", "rgb"),
         ("RGBPublisher.inputs:topicName", f"{topic_prefix}/rgb"),
         ("RGBPublisher.inputs:frameId", frame_id),
@@ -109,6 +110,21 @@ def _create_one_camera_omnigraphs(
         ("CameraInfoPublisher.inputs:frameId", frame_id),
         ("CameraInfoPublisher.inputs:useSystemTime", False),
     ]
+    if cam_prim_name != 'front_cam':
+        # The auxiliary eye publishes only RGB and its own intrinsics. Baseline
+        # comes from the physical TF; the C++ frontend publishes rectified P/R.
+        publishers = (['DepthPublisher', 'CameraInfoPublisher'] if cam_prim_name == 'd455f_depth'
+                      else ['RGBPublisher', 'CameraInfoPublisher'])
+        import os
+        if cam_prim_name == 'twin612_left' and os.getenv('CAMERA_EVAL_GT', '0') == '1':
+            publishers.append('DepthPublisher')
+            set_values = [(key, f'{topic_prefix}/depth_reference' if key == 'DepthPublisher.inputs:topicName' else value)
+                          for key, value in set_values]
+
+        create_nodes = [item for item in create_nodes if item[0] in
+                        ('OnPlaybackTick', 'IsaacCreateRenderProduct', *publishers)]
+        set_values = [item for item in set_values if item[0].split('.')[0] in
+                      ('IsaacCreateRenderProduct', *publishers)]
     connections = [
         ("OnPlaybackTick.outputs:tick", "IsaacCreateRenderProduct.inputs:execIn")
     ]
@@ -156,4 +172,6 @@ def create_front_cam_omnigraph(robot_num: int):
     - ``robot{N}/front_cam/camera_info``
 
     """
-    _create_one_camera_omnigraphs(robot_num, "front_cam")
+    from core.camera_extrinsic import front_camera_poses
+    for name, _, _ in front_camera_poses():
+        _create_one_camera_omnigraphs(robot_num, name)
