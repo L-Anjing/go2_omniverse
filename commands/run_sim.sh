@@ -91,11 +91,16 @@ case "${ROBOT_TYPE}" in
     b2w) DEFAULT_LOCOMOTION_POLICY="checkpoints/b2w/locomotion/policy_b2w_new_2.pt" ;;
     *) echo "[ERROR] ROBOT_TYPE must be go2 or b2w" >&2; exit 2 ;;
 esac
+# USD terrain constraints are enabled by default for Go2. The limiter is not
+# calibrated for B2W, so keep that profile off unless its support is added.
+if [ -z "${TERRAIN_SPEED_LIMIT:-}" ]; then
+    if [ "${ROBOT_TYPE}" = go2 ]; then TERRAIN_SPEED_LIMIT=1; else TERRAIN_SPEED_LIMIT=0; fi
+fi
 POLICY_PATH="${POLICY_PATH:-${DEFAULT_LOCOMOTION_POLICY}}"
 POLICY_CONFIG="${POLICY_CONFIG:-checkpoints/go2/moe_cts/export/config.yaml}"
 CONTROLLER_ARGS=(--controller "${CONTROLLER}" --policy_path "${POLICY_PATH}" --policy_config "${POLICY_CONFIG}")
 CONTROLLER_ARGS+=(--velocity_log_interval "${VELOCITY_LOG_INTERVAL:-5.0}")
-case "${TERRAIN_SPEED_LIMIT:-0}" in
+case "${TERRAIN_SPEED_LIMIT}" in
     1|true|True) CONTROLLER_ARGS+=(--terrain_speed_limit) ;;
     0|false|False) ;;
     *) echo "[ERROR] TERRAIN_SPEED_LIMIT must be 0 or 1" >&2; exit 1 ;;
@@ -129,7 +134,7 @@ echo "[INFO] Launching main simulation..."
 echo "[INFO] Locomotion profile: ${ROBOT_TYPE} (${CONTROLLER})"
 echo "[INFO] Simulation robot: ${ROBOT_TYPE} (locomotion only)"
 echo "[INFO] Policy: ${POLICY_PATH}"
-echo "[INFO] Terrain speed limiter: ${TERRAIN_SPEED_LIMIT:-0}"
+echo "[INFO] Terrain speed limiter: ${TERRAIN_SPEED_LIMIT}"
 echo "[INFO] Rendering mode: ${RENDERING_MODE}"
 echo "[INFO] Camera: front_cam, stereo RGB=${STEREO_RGB:-0}, baseline=${STEREO_BASELINE:-config} m"
 echo "[INFO] Headless: ${HEADLESS}"

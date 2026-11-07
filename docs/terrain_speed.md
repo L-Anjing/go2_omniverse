@@ -27,20 +27,20 @@ ROS timeline时间转换到控制时钟后再检查有效期，保留两种时�
 未升级 Isaac Sim 4.5，未覆盖任何 checkpoint。历史权重文件不再被运行时选择。
 
 ```bash
-# 默认 Lab，统一速度上限；地形功能关闭
+# 默认 Lab；Go2 默认启用地形限速和平地 3.5 m/s 命令上限
 bash commands/run_sim.sh
 
-# Lab + USD 地形限速
-CONTROLLER=lab TERRAIN_SPEED_LIMIT=1 bash commands/run_sim.sh
+# 显式关闭 Go2 地形限速
+TERRAIN_SPEED_LIMIT=0 bash commands/run_sim.sh
 
 # 配置文件、显式全局上限（更低的全局限制仍会生效）
 TERRAIN_SPEED_LIMIT=1 TERRAIN_SPEED_CONFIG=configs/terrain_speed.yaml \
   MAX_VELOCITY_COMMAND="3.0 0.4 1.0" bash commands/run_sim.sh
 ```
 
-默认关闭；启用但不指定 `MAX_VELOCITY_COMMAND` 时，使用配置中的平地上限
-`[3.5,0.5,1.5]`，避免原先的 1 m/s 全局限幅掩盖地形功能。
-配置 `enabled: false` 也会完全绕过适配器，恢复原始 Lab command clipping。
+Go2 默认启用；B2W 不支持该 Go2 专用 limiter，默认关闭。
+Go2 的全局命令上限默认 `[3.5,1.0,1.5]`，平地 limiter 上限为 3.5 m/s；楼梯与未知地形分别使用配置中的较低上限。更低的地形限幅仍会生效。
+`TERRAIN_SPEED_LIMIT=0` 或配置 `enabled: false` 可绕过适配器。
 
 ## 执行链与文件
 

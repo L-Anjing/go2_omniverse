@@ -113,7 +113,7 @@ def main():
             'ang_vel_scale', 'dof_pos_scale', 'dof_vel_scale', 'command_scale', 'action_scale',
             'action_clip', 'num_actions', 'num_obs', 'command_kind', 'policy_joint_names')
     config['deployment'] = {k: deploy[k] for k in keys}
-    config['deployment'].update(max_velocity_command=[1.0, 1.0, 1.5],
+    config['deployment'].update(max_velocity_command=[3.5, 1.0, 1.5],
                                 training_velocity_min=[r[0] for r in flat_ranges],
                                 training_velocity_max=[r[1] for r in flat_ranges],
                                 actuator_delay_steps=0, joint_friction=0.01, armature=0.0)

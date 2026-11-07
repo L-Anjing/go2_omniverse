@@ -17,7 +17,7 @@
 | 重力 | projected_gravity_b | 相同，站立 `[0,0,-1]` |
 | 速度指令 | `[vx,vy,wz] × [2,2,0.25]` | `[vx,vy,wz] × [0.5,1,1]` |
 | 指令单位/坐标 | m/s、m/s、rad/s，机器人机体系 | 相同 |
-| 输入限速 | ±[1,1,1.5] | 配置项，默认 ±[1,1,1.5]；配置允许最大 ±[4.2,1,3] |
+| 输入限速 | ±[1,1,1.5] | 默认 `[3.5,1,1.5]`；训练包络允许前向 +4.2 m/s、后向 −4.5 m/s、侧向 ±1 m/s、偏航 ±3 rad/s |
 | 关节位置 | q − q_default | 相同，scale=1 |
 | 关节速度 | dq × 0.05 | (dq − dq_default) × 0.05，默认 dq=0 |
 | previous action | 12D | 12D 已做 raw action clipping 的上一步动作；reset 清零 |
@@ -115,7 +115,7 @@ torque、base contact force 到 NPZ，摘要在 `tests/lab_policy/sim_results/su
 
 **4.2 m/s 仍属实验范围：**测试未跌倒，但实际 vx 波动约 1.77–4.64 m/s，
 tracking RMSE 明显高于 4.0 m/s。不能称为稳定精确跟踪 4.2 m/s。
-默认限速仍为 `[1,1,1.5]`。独立平地仿真可显式设置：
+Go2 默认命令上限为 `[3.5,1,1.5]`，地形 limiter 默认开启。独立平地仿真仍可显式设置实验上限：
 
 ```bash
 CONTROLLER=lab CUSTOM_ENV=flat MAX_VELOCITY_COMMAND="4.0 1.0 1.5" ./commands/run_sim.sh

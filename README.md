@@ -34,7 +34,7 @@ Go2/B2W 每个进程选择一种机器人，`ROBOT_AMOUNT` 复制该类型；混
 | 原前置相机 | RGB、Depth、CameraInfo、语义分割，供现有链路使用 |
 | 双目建图传感器 | 可选独立 D455f 参考 Depth 与两只 TWIN612 几何参考 RGB 相机 |
 | ROS2 桥接 | 图像、里程计、IMU、LiDAR、TF 和速度控制 |
-| 地形速度调节 | 可选 USD 地形限速器，沿用同一个运动策略 |
+| 地形速度调节 | Go2 默认启用 USD 地形限速器，沿用同一个运动策略；B2W 暂不支持 |
 
 双目目前使用 RGB 转灰度作为热红外代理，模拟相机几何；热辐射成像和真实热红外噪声不在此代理模型中。
 
@@ -242,13 +242,13 @@ ros2 run teleop_twist_keyboard teleop_twist_keyboard \
 ### 3.5 地形、摩擦与场景配置
 
 ```bash
-TERRAIN_SPEED_LIMIT=1 bash commands/run_sim.sh
+bash commands/run_sim.sh
 
 GROUND_STATIC_FRICTION=0.9 GROUND_DYNAMIC_FRICTION=0.8 \
-TERRAIN_SPEED_LIMIT=1 bash commands/run_sim.sh
+bash commands/run_sim.sh
 ```
 
-地形限速默认关闭；配置位于 [configs/terrain_speed.yaml](configs/terrain_speed.yaml)，可通过 `TERRAIN_SPEED_CONFIG` 切换。它在底层运动策略之前调节速度请求；地形配置值属于仿真参数。地面摩擦默认静摩擦 `0.9`、动摩擦 `0.8`，要求 `0 ≤ 动摩擦 ≤ 静摩擦`。
+Go2 默认启用地形限速，平地前向命令上限为 `3.5 m/s`；楼梯和未知地形使用配置中的较低上限。Lab policy 全局默认命令范围为 `[3.5, 1.0, 1.5]`（`vx, vy, wz`），不再被旧的 `1 m/s` 上限截断。使用 `TERRAIN_SPEED_LIMIT=0` 可显式关闭。配置位于 [configs/terrain_speed.yaml](configs/terrain_speed.yaml)，可通过 `TERRAIN_SPEED_CONFIG` 切换。地面摩擦默认静摩擦 `0.9`、动摩擦 `0.8`，要求 `0 ≤ 动摩擦 ≤ 静摩擦`。
 
 场景使用 `assets/env/big_scene/<场景>/<场景>_navigation.usda` 及其引用资产。Hospital / Warehouse 正式入口检查对应标注资产。生成 Hospital 导航 overlay：
 

@@ -48,7 +48,9 @@ class LabObservations:
 @configclass
 class Go2LabDeployCfg(UnitreeGo2CustomEnvCfg):
     observations: LabObservations = LabObservations()
-    lab_command_limits: tuple = (1.0, 1.0, 1.5)
+    # Match the default flat-terrain envelope; the terrain limiter applies
+    # lower caps for stairs and unknown surfaces when enabled.
+    lab_command_limits: tuple = (3.5, 1.0, 1.5)
 
     def __post_init__(self):
         super().__post_init__()
