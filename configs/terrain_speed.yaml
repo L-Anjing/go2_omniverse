@@ -1,0 +1,31 @@
+terrain_speed:
+  behavior_version: smooth  # legacy restores the previous immediate-cap behavior
+  navigation_constraints_enabled: false  # Lab collector sets NAV_SPEED_CONSTRAINTS=1
+  navigation_constraint_timeout: 0.2
+  enabled: true
+  flat_max_vx: 3.5
+  stairs_max_vx: 0.7
+  unknown_max_vx: 0.5
+  flat_max_vy: 0.5
+  stairs_max_vy: 0.2
+  unknown_max_vy: 0.2
+  max_yaw_rate: 1.5
+  accel_limit: 1.0
+  decel_limit: 2.0
+  braking_decel_factor: 0.75
+  yaw_accel_limit: 2.0
+  brake_margin: 0.5
+  lookahead_min: 1.0
+  lookahead_max: 8.0
+  terrain_state_hysteresis: 0.3
+  body_radius: 0.4
+  nominal_base_height: 0.35
+  body_min_z: 0.22
+  body_max_z: 0.65
+  surface_z_tolerance: 0.28
+  query_step: 0.15
+  grid_size: 1.0
+  flat_max_slope: 0.08
+  plane_index_half_extent: 100.0
+  max_timestamp_gap: 0.25
+  log_interval: 5.0

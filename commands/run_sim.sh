@@ -84,9 +84,34 @@ print(f"[INFO] torchvision={torchvision.__version__} ({torchvision.__file__})")
 PY
 
 # 4. 运行参数配置
-EXPERIMENT_NAME="${EXPERIMENT_NAME:-unitree_go2_fullscene_moe_cts}"
-LOAD_RUN="${LOAD_RUN:-.*}"
-CHECKPOINT="${CHECKPOINT:-model_164000.pt}"
+CONTROLLER="${CONTROLLER:-lab}"
+ROBOT_TYPE="${ROBOT_TYPE:-go2}"
+case "${ROBOT_TYPE}" in
+    go2) DEFAULT_LOCOMOTION_POLICY="checkpoints/moe_cts_lab/policy.pt" ;;
+    b2w) DEFAULT_LOCOMOTION_POLICY="checkpoints/b2w/policy_b2w_new_2.pt" ;;
+    *) echo "[ERROR] ROBOT_TYPE must be go2 or b2w" >&2; exit 2 ;;
+esac
+POLICY_PATH="${POLICY_PATH:-${DEFAULT_LOCOMOTION_POLICY}}"
+POLICY_CONFIG="${POLICY_CONFIG:-checkpoints/moe_cts_lab/config.yaml}"
+CONTROLLER_ARGS=(--controller "${CONTROLLER}" --policy_path "${POLICY_PATH}" --policy_config "${POLICY_CONFIG}")
+CONTROLLER_ARGS+=(--velocity_log_interval "${VELOCITY_LOG_INTERVAL:-5.0}")
+case "${TERRAIN_SPEED_LIMIT:-0}" in
+    1|true|True) CONTROLLER_ARGS+=(--terrain_speed_limit) ;;
+    0|false|False) ;;
+    *) echo "[ERROR] TERRAIN_SPEED_LIMIT must be 0 or 1" >&2; exit 1 ;;
+esac
+CONTROLLER_ARGS+=(--terrain_speed_config "${TERRAIN_SPEED_CONFIG:-configs/terrain_speed.yaml}")
+if [ -n "${MAX_STEPS:-}" ]; then
+    CONTROLLER_ARGS+=(--max_steps "${MAX_STEPS}")
+fi
+if [ -n "${MAX_VELOCITY_COMMAND:-}" ]; then
+    read -r -a VELOCITY_LIMITS <<< "${MAX_VELOCITY_COMMAND}"
+    if [ "${#VELOCITY_LIMITS[@]}" -ne 3 ]; then
+        echo "[ERROR] MAX_VELOCITY_COMMAND requires three values: vx vy wz" >&2
+        exit 1
+    fi
+    CONTROLLER_ARGS+=(--max_velocity_command "${VELOCITY_LIMITS[@]}")
+fi
 CMD_SOURCE="${CMD_SOURCE:-ros2}"
 RENDERING_MODE="${RENDERING_MODE:-quality}"
 HEADLESS="${HEADLESS:-0}"
@@ -95,9 +120,10 @@ ROBOT_AMOUNT="${ROBOT_AMOUNT:-1}"
 
 # 5. 启动主程序
 echo "[INFO] Launching main simulation..."
-echo "[INFO] Deploy architecture: moe_cts"
-echo "[INFO] Experiment: ${EXPERIMENT_NAME}"
-echo "[INFO] Checkpoint pattern: ${CHECKPOINT}"
+echo "[INFO] Locomotion profile: ${ROBOT_TYPE} (${CONTROLLER})"
+echo "[INFO] Simulation robot: ${ROBOT_TYPE} (locomotion only)"
+echo "[INFO] Policy: ${POLICY_PATH}"
+echo "[INFO] Terrain speed limiter: ${TERRAIN_SPEED_LIMIT:-0}"
 echo "[INFO] Rendering mode: ${RENDERING_MODE}"
 echo "[INFO] Camera: front_cam"
 echo "[INFO] Headless: ${HEADLESS}"
@@ -112,13 +138,12 @@ fi
 cd "${REPO_ROOT}"
 export TF_CPP_MIN_LOG_LEVEL=2  # 只对 tensorflow 有效
 exec python -u main.py \
+    --robot_type "${ROBOT_TYPE}" \
+    "${CONTROLLER_ARGS[@]}" \
     --robot_amount "${ROBOT_AMOUNT}" \
     --device cuda \
     ${HEADLESS_FLAG} \
     --enable_cameras \
     --rendering_mode "${RENDERING_MODE}" \
     --custom_env "${CUSTOM_ENV}" \
-    --cmd_source "${CMD_SOURCE}" \
-    --experiment_name "${EXPERIMENT_NAME}" \
-    --load_run "${LOAD_RUN}" \
-    --checkpoint "${CHECKPOINT}"
+    --cmd_source "${CMD_SOURCE}"

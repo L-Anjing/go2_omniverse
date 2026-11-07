@@ -1,5 +1,6 @@
 build
 log
+logs/
 install
 .vscode
 __pycache__
@@ -13,3 +14,7 @@ env
 .codex
 .codewhale
 rsl_rl_cts/__pycache__
+/tmp
+/tests/
+/checkpoints/
+/assets/robots/b2w/*.usd

@@ -1,0 +1,18 @@
+# T_camera^base: camera optical-frame pose relative to robot base_link.
+# p^base = R_camera^base * p^camera + t_camera^base.
+# R is row-major; T is the camera origin in base coordinates, in metres.
+# base: x forward, y left, z up. Camera optical: x right, y down, z forward.
+# 这组值是渲染相机位姿和 base_link -> front_cam 静态 TF 的唯一来源。
+# 当前生效：原始安装位置，光轴水平向前；修改后重新启动仿真。
+robot_extrinsic:
+  camera_to_robot_R: [ 0.0,  0.0,  1.0,
+                     -1.0,  0.0,  0.0,
+                      0.0, -1.0,  0.0]
+  camera_to_robot_T: [0.32487, -0.00095, 0.05362]
+
+  # 备份：恢复前的 10° 下倾配置（仅注释，不生效）。
+  # 如需启用，用以下 R/T 替换上面的生效值，不要添加重复 YAML 键。
+  # camera_to_robot_R: [ 0.0, -0.1736481777,  0.9848077530,
+  #                    -1.0,  0.0,           0.0,
+  #                     0.0, -0.9848077530, -0.1736481777]
+  # camera_to_robot_T: [0.32487, -0.00095, 0.25362]

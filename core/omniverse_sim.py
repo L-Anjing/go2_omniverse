@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import re
 from pathlib import Path
 from isaaclab.app import AppLauncher
@@ -60,6 +61,17 @@ import threading
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Deploy an RL agent with RSL-RL.")
+parser.add_argument('--robot_type', choices=('go2', 'b2w'), default='go2')
+parser.add_argument('--controller', choices=('lab',), default='lab')
+parser.add_argument('--terrain_speed_limit', action='store_true', help='Enable USD terrain-aware command limits')
+parser.add_argument('--terrain_speed_config', default='configs/terrain_speed.yaml')
+parser.add_argument('--policy_path', type=str, default=None)
+parser.add_argument('--policy_config', type=str, default='checkpoints/moe_cts_lab/config.yaml')
+parser.add_argument('--max_velocity_command', type=float, nargs=3, default=None,
+                    metavar=('VX', 'VY', 'WZ'), help='Lab body-frame command limits; default from export config')
+parser.add_argument('--max_steps', type=int, default=0, help='Stop after N simulation control steps (0: unlimited)')
+parser.add_argument('--velocity_log_interval', type=float, default=5.0,
+                    help='Wall-clock seconds between actual body velocity logs (0: disabled)')
 # parser.add_argument("--device", type=str, default="cpu", help="Use CPU pipeline.")
 parser.add_argument(
     "--disable_fabric",
@@ -102,7 +114,19 @@ cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
-args_cli.robot = "go2"
+if not math.isfinite(args_cli.velocity_log_interval) or args_cli.velocity_log_interval < 0:
+    parser.error('--velocity_log_interval must be finite and nonnegative')
+args_cli.robot = args_cli.robot_type
+args_cli.policy_path = args_cli.policy_path or (
+    'checkpoints/b2w/policy_b2w_new_2.pt' if args_cli.robot_type == 'b2w'
+    else 'checkpoints/moe_cts_lab/policy.pt'
+)
+os.environ['SIM_ROBOT_TYPE'] = args_cli.robot_type
+os.environ['SIM_COMMAND_SOURCE'] = args_cli.cmd_source
+if args_cli.robot_type == 'b2w' and args_cli.terrain_speed_limit:
+    parser.error('The Go2 terrain speed limiter is not calibrated for B2W')
+if args_cli.robot_type == 'b2w' and args_cli.custom_env != 'hospital':
+    parser.error('B2W currently supports the shared Hospital scene')
 
 
 # launch omniverse app
@@ -131,9 +155,7 @@ import torch
 import carb
 
 
-from isaaclab_tasks.utils import get_checkpoint_path
 from isaaclab_rl.rsl_rl import (
-    RslRlOnPolicyRunnerCfg,
     RslRlVecEnvWrapper,
 )
 import isaaclab.sim as sim_utils
@@ -151,10 +173,7 @@ from geometry_msgs.msg import Twist
 from std_srvs.srv import Trigger
 
 
-from configs.agent_cfg import unitree_go2_agent_cfg
 from configs.custom_rl_env import (
-    Go2StairDeployCfg,
-    Go2FullSceneDeployCfg,
     GO2_MODEL_JOINT_NAMES,
 )
 import configs.custom_rl_env as custom_rl_env
@@ -165,6 +184,8 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import math as math_utils
 from omni.physx import get_physx_scene_query_interface
 from pxr import Semantics, Usd, UsdGeom
+from core import hospital_scene
+from core.robot_profiles import robot_namespace
 
 
 from core.omnigraph import create_front_cam_omnigraph
@@ -192,29 +213,9 @@ _EPISODE_RESET_LOCK = threading.Lock()
 _EPISODE_RESET_ERROR = ""
 
 
-def _direct_semantic_class(prim) -> str:
-    for attribute in prim.GetAttributes():
-        if "semanticData" not in attribute.GetName():
-            continue
-        value = attribute.Get()
-        if value:
-            return canonical_semantic_class(str(value))
-    return "misc"
+_direct_semantic_class = hospital_scene._direct_semantic_class
 
-
-def _spatial_semantic_class(prim, profile_hint: str = "") -> str:
-    """Resolve geometry leaf-first, then fall back to authored ancestor labels."""
-    inferred = infer_semantic_class(str(prim.GetPath()), profile_hint)
-    if inferred != "misc":
-        return inferred
-    current = prim
-    while current and current.IsValid() and not current.IsPseudoRoot():
-        authored = _direct_semantic_class(current)
-        if authored != "misc":
-            return authored
-        current = current.GetParent()
-    return "misc"
-
+_spatial_semantic_class = hospital_scene._spatial_semantic_class
 
 def _spatial_float_env(name: str, default: float) -> float:
     try:
@@ -917,182 +918,16 @@ def _default_go2_deploy_experiment_name() -> str:
     return "unitree_go2_fullscene_moe_cts"
 
 
-def resolve_agent_cfg(base_cfg: RslRlOnPolicyRunnerCfg) -> RslRlOnPolicyRunnerCfg:
-    """Return a copy of the base agent config with CLI overrides applied."""
-    agent_cfg = copy.deepcopy(base_cfg)
-
-    if args_cli.robot == "go2":
-        agent_cfg["experiment_name"] = _default_go2_deploy_experiment_name()
-    if args_cli.seed is not None:
-        agent_cfg["seed"] = args_cli.seed
-    if args_cli.experiment_name is not None:
-        agent_cfg["experiment_name"] = args_cli.experiment_name
-    if args_cli.run_name is not None:
-        agent_cfg["run_name"] = args_cli.run_name
-    if args_cli.logger is not None:
-        agent_cfg["logger"] = args_cli.logger
-    if args_cli.log_project_name is not None:
-        agent_cfg["wandb_project"] = args_cli.log_project_name
-        agent_cfg["neptune_project"] = args_cli.log_project_name
-    if args_cli.resume is not None:
-        agent_cfg["resume"] = args_cli.resume
-    if args_cli.load_run is not None:
-        agent_cfg["load_run"] = args_cli.load_run
-    if args_cli.checkpoint is not None:
-        agent_cfg["load_checkpoint"] = args_cli.checkpoint
-
-    return agent_cfg
 
 
-def configure_policy_from_checkpoint(
-    agent_cfg: RslRlOnPolicyRunnerCfg, checkpoint_path: str
-) -> None:
-    """Align policy config with the saved checkpoint parameterization."""
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
-    model_state = ckpt.get("model_state_dict", {})
-    policy_cfg = dict(agent_cfg["policy"])
-
-    if "log_std" in model_state:
-        policy_cfg["noise_std_type"] = "log"
-    elif "std" in model_state:
-        policy_cfg["noise_std_type"] = "scalar"
-
-    agent_cfg["policy"] = policy_cfg
 
 
-def _infer_hidden_dims_from_mlp(state_dict: dict[str, torch.Tensor], prefix: str) -> list[int]:
-    weights = sorted(k for k in state_dict if k.startswith(prefix) and k.endswith(".weight"))
-    if len(weights) < 2:
-        return []
-    return [state_dict[key].shape[0] for key in weights[:-1]]
 
 
-def _infer_cts_checkpoint_dims(checkpoint_path: str, map_location: str = "cpu") -> dict[str, int]:
-    """Infer CTS model dimensions directly from checkpoint tensor shapes."""
-    ckpt = torch.load(checkpoint_path, map_location=map_location)
-    state_dict = ckpt["model_state_dict"]
-
-    enc_w = sorted(k for k in state_dict if k.startswith("teacher_encoder.") and k.endswith(".weight"))
-    latent_dim = state_dict[enc_w[-1]].shape[0]
-
-    act_w = sorted(k for k in state_dict if k.startswith("actor.") and k.endswith(".weight"))
-    num_actor_obs = state_dict[act_w[0]].shape[1] - latent_dim
-    num_actions = state_dict[act_w[-1]].shape[0]
-
-    crit_w = sorted(k for k in state_dict if k.startswith("critic.") and k.endswith(".weight"))
-    num_critic_obs = state_dict[crit_w[0]].shape[1] - latent_dim
-
-    actor_hidden_dims = _infer_hidden_dims_from_mlp(state_dict, "actor.")
-    critic_hidden_dims = _infer_hidden_dims_from_mlp(state_dict, "critic.")
-
-    if not any(k.startswith("student_moe_encoder.") for k in state_dict):
-        raise RuntimeError("Only MoE-CTS checkpoints are supported.")
-    checkpoint_kind = "moe_cts"
-    teacher_hidden_dims = _infer_hidden_dims_from_mlp(state_dict, "teacher_encoder.0.")
-    gating_w = sorted(
-        k
-        for k in state_dict
-        if k.startswith("student_moe_encoder.moe.gating_network.0.network.")
-        and k.endswith(".weight")
-    )
-    backbone_w = sorted(
-        k
-        for k in state_dict
-        if k.startswith("student_moe_encoder.moe.experts.backbone.network.")
-        and k.endswith(".weight")
-    )
-    if not gating_w or not backbone_w:
-        raise RuntimeError("Unsupported MoE-CTS checkpoint layout.")
-    expert_num = state_dict[gating_w[-1]].shape[0]
-    history_length = state_dict[backbone_w[0]].shape[1] // num_actor_obs
-    expert_hidden_dim = state_dict[backbone_w[-1]].shape[0] // expert_num
-    student_hidden_dims = [*([state_dict[key].shape[0] for key in gating_w[:-1]]), expert_hidden_dim]
-
-    return {
-        "checkpoint_kind": checkpoint_kind,
-        "latent_dim": latent_dim,
-        "num_actor_obs": num_actor_obs,
-        "num_critic_obs": num_critic_obs,
-        "num_actions": num_actions,
-        "history_length": history_length,
-        "actor_hidden_dims": actor_hidden_dims,
-        "critic_hidden_dims": critic_hidden_dims,
-        "teacher_encoder_hidden_dims": teacher_hidden_dims,
-        "student_encoder_hidden_dims": student_hidden_dims,
-        "expert_num": expert_num,
-    }
 
 
-def load_cts_policy(checkpoint_path: str, env, device: str):
-    """Load a CTS-family checkpoint and return a student-only inference callable.
-
-    All model dimensions are inferred directly from the checkpoint weights so
-    the function is robust to different training configurations:
-      - latent_dim   : output of last linear in teacher_encoder
-      - num_actor_obs: actor first-layer input minus latent_dim
-      - num_critic_obs: critic first-layer input minus latent_dim
-      - num_actions  : actor last-layer output
-      - history_length: student encoder first-layer input / num_actor_obs
-    """
-    from rsl_rl_cts import ActorCriticMoECTS
-
-    ckpt = torch.load(checkpoint_path, map_location=device)
-    state_dict = ckpt["model_state_dict"]
-    dims = _infer_cts_checkpoint_dims(checkpoint_path, map_location=device)
-    checkpoint_kind = dims["checkpoint_kind"]
-    latent_dim = dims["latent_dim"]
-    num_actor_obs = dims["num_actor_obs"]
-    num_actions = dims["num_actions"]
-    num_critic_obs = dims["num_critic_obs"]
-    history_length = dims["history_length"]
-
-    print(
-        f"[CTS] Checkpoint type: {checkpoint_kind}"
-    )
-    print(f"[CTS] Checkpoint dims: actor_obs={num_actor_obs}, critic_obs={num_critic_obs}, "
-          f"actions={num_actions}, latent={latent_dim}, history={history_length}")
-    print(f"[CTS] Env reports:     num_obs={env.num_obs}, num_actions={env.num_actions}")
-    if env.num_obs != num_actor_obs:
-        raise RuntimeError(
-            f"Observation dimension mismatch: checkpoint expects {num_actor_obs}D obs "
-            f"but env produces {env.num_obs}D.  Ensure the deployment env cfg matches "
-            f"the training env cfg (height_scanner size, observation terms, etc.)."
-        )
-
-    model = ActorCriticMoECTS(
-        num_obs=num_actor_obs,
-        num_critic_obs=num_critic_obs,
-        num_actions=num_actions,
-        num_envs=env.num_envs,
-        history_length=history_length,
-        actor_hidden_dims=dims["actor_hidden_dims"],
-        critic_hidden_dims=dims["critic_hidden_dims"],
-        teacher_encoder_hidden_dims=dims["teacher_encoder_hidden_dims"],
-        student_encoder_hidden_dims=dims["student_encoder_hidden_dims"],
-        expert_num=dims["expert_num"],
-        latent_dim=latent_dim,
-    ).to(device)
-    model.load_state_dict(state_dict)
-    model.eval()
-    print(f"[CTS] Loaded checkpoint from: {checkpoint_path}")
-    return model.act_inference
 
 
-def resolve_checkpoint_path(
-    log_root_path: str, load_run: str, load_checkpoint: str
-) -> str:
-    """Resolve a checkpoint whether models live in the experiment root or a run subdir."""
-    root_checkpoints = [
-        entry
-        for entry in os.listdir(log_root_path)
-        if os.path.isfile(os.path.join(log_root_path, entry))
-        and re.match(load_checkpoint, entry)
-    ]
-    if root_checkpoints:
-        root_checkpoints.sort(key=lambda name: f"{name:0>15}")
-        return os.path.join(log_root_path, root_checkpoints[-1])
-
-    return get_checkpoint_path(log_root_path, load_run, load_checkpoint)
 
 
 # Keyboard teleop speed settings (m/s for linear, rad/s for angular).
@@ -1100,6 +935,7 @@ def resolve_checkpoint_path(
 # narrowed at runtime to match their actual training command envelope.
 CMD_LIN_VEL = 1.5   # forward / backward / strafe speed  [m/s]
 CMD_ANG_VEL = 1.5   # yaw rotation speed                 [rad/s]
+CMD_SIDE_VEL = None  # Lab uses a separate lateral limit.
 
 
 def _base_command_tensor(num_envs: int, device: torch.device | str) -> torch.Tensor:
@@ -1120,9 +956,9 @@ def sub_keyboard_event(event, *args, **kwargs) -> bool:
             if event.input.name == "S":
                 custom_rl_env.base_command["0"] = [-CMD_LIN_VEL, 0, 0]
             if event.input.name == "A":
-                custom_rl_env.base_command["0"] = [0, CMD_LIN_VEL, 0]
+                custom_rl_env.base_command["0"] = [0, CMD_SIDE_VEL if CMD_SIDE_VEL is not None else CMD_LIN_VEL, 0]
             if event.input.name == "D":
-                custom_rl_env.base_command["0"] = [0, -CMD_LIN_VEL, 0]
+                custom_rl_env.base_command["0"] = [0, -(CMD_SIDE_VEL if CMD_SIDE_VEL is not None else CMD_LIN_VEL), 0]
             if event.input.name == "Q":
                 custom_rl_env.base_command["0"] = [0, 0, CMD_ANG_VEL]
             if event.input.name == "E":
@@ -1134,9 +970,9 @@ def sub_keyboard_event(event, *args, **kwargs) -> bool:
                 if event.input.name == "K":
                     custom_rl_env.base_command["1"] = [-CMD_LIN_VEL, 0, 0]
                 if event.input.name == "J":
-                    custom_rl_env.base_command["1"] = [0, CMD_LIN_VEL, 0]
+                    custom_rl_env.base_command["1"] = [0, CMD_SIDE_VEL if CMD_SIDE_VEL is not None else CMD_LIN_VEL, 0]
                 if event.input.name == "L":
-                    custom_rl_env.base_command["1"] = [0, -CMD_LIN_VEL, 0]
+                    custom_rl_env.base_command["1"] = [0, -(CMD_SIDE_VEL if CMD_SIDE_VEL is not None else CMD_LIN_VEL), 0]
                 if event.input.name == "U":
                     custom_rl_env.base_command["1"] = [0, 0, CMD_ANG_VEL]
                 if event.input.name == "O":
@@ -1202,32 +1038,7 @@ def setup_custom_env():
         )
 
 
-def _deactivate_hospital_collision_planes(stage) -> int:
-    """Disable duplicate ground-plane prims under the imported hospital subtree.
-
-    The labeled hospital USD does not reliably expose the original
-    ``/World/hospital/Root/CollisionPlane`` prim. In practice the duplicate
-    hospital-local ground may appear as either ``CollisionPlane`` or
-    ``WorldGrid`` after export/composition, so resolve by a small allowlist of
-    prim names instead of relying on one hard-coded path.
-    """
-    hospital_root = stage.GetPrimAtPath("/World/hospital")
-    if not hospital_root or not hospital_root.IsValid():
-        return 0
-
-    candidate_names = {"CollisionPlane", "WorldGrid"}
-    deactivated = 0
-    for prim in stage.Traverse():
-        path = str(prim.GetPath())
-        if not path.startswith("/World/hospital/"):
-            continue
-        if prim.GetName() not in candidate_names:
-            continue
-        prim.SetActive(False)
-        deactivated += 1
-        print(f"[INFO] Hospital duplicate ground prim deactivated: {path}")
-    return deactivated
-
+_deactivate_hospital_collision_planes = hospital_scene._deactivate_hospital_collision_planes
 
 def _deactivate_warehouse_collision_planes(stage) -> int:
     """Disable duplicate ground-plane prims under the imported warehouse."""
@@ -1250,52 +1061,16 @@ def _deactivate_warehouse_collision_planes(stage) -> int:
 
 
 def _spawn_hospital_usd(prim_path: str, cfg, translation=None, orientation=None):
-    """Spawn hospital USD and immediately deactivate its duplicate ground plane.
+    def on_loaded(stage, path):
+        _record_custom_scene_bounds(stage, path)
+        if args_cli.robot == 'b2w':
+            from core.b2w_sensor_geometry import build_sensor_mesh
+            build_sensor_mesh(stage, path)
 
-    Using this as the spawn func inside AssetBaseCfg lets us load the hospital
-    BEFORE gym.make() (so robot and scene appear simultaneously) while still
-    removing the CollisionPlane before PhysX runs its first broad-phase reset.
-
-    Without this, two coincident collision planes exist during PhysX init and
-    crash scene loading.  Without pre-gym.make loading, hospital collision meshes
-    appear mid-episode and trigger base_contact every step.
-    """
-    from isaaclab.sim.spawners.from_files import spawn_from_usd
-    import omni.usd
-    prim = spawn_from_usd(prim_path, cfg, translation=translation, orientation=orientation)
-    stage = omni.usd.get_context().get_stage()
-    repaired_labels = _reconcile_navigation_semantics(stage, prim_path)
-    navigation_labels = _label_named_navigation_geometry(stage, prim_path)
-    railing_labels = _label_named_railing_geometry(stage, prim_path)
-    if navigation_labels.get("floor", 0) == 0:
-        raise RuntimeError(
-            "Hospital USD exposes no directly labeled renderable floor prims; "
-            "refusing to start semantic collection"
-        )
-    stair_obstacle_labels = _count_stair_obstacle_labels(stage, prim_path)
-    if stair_obstacle_labels == 0:
-        raise RuntimeError(
-            "Hospital stair geometry exposes no direct wall/railing labels; "
-            "refusing to start semantic collection"
-        )
-    annotation_count = _count_semantic_annotations(stage, prim_path)
-    if annotation_count == 0:
-        raise RuntimeError(f"Labeled hospital USD has no semantic annotations: {cfg.usd_path}")
-    num_planes = _deactivate_hospital_collision_planes(stage)
-    _record_custom_scene_bounds(stage, prim_path)
-    if num_planes == 0:
-        print("[WARN] Hospital CollisionPlane not found during spawn — check USD prim path")
-    else:
-        print(
-            f"[INFO] Hospital spawned with {annotation_count} semantic annotations; "
-            f"{num_planes} duplicate ground prim(s) deactivated; "
-            f"{repaired_labels} navigation label(s) reconciled; "
-            f"direct navigation labels={navigation_labels}; "
-            f"direct railing labels={railing_labels}; "
-            f"stair obstacle labels={stair_obstacle_labels}"
-        )
-    return prim
-
+    return hospital_scene._spawn_hospital_usd(
+        prim_path, cfg, translation=translation, orientation=orientation,
+        on_loaded=on_loaded,
+    )
 
 def _spawn_warehouse_usd(prim_path: str, cfg, translation=None, orientation=None):
     """Spawn the labeled warehouse USD.
@@ -1314,6 +1089,8 @@ def _spawn_warehouse_usd(prim_path: str, cfg, translation=None, orientation=None
     if annotation_count == 0:
         raise RuntimeError(f"Labeled warehouse USD has no semantic annotations: {cfg.usd_path}")
     num_planes = _deactivate_warehouse_collision_planes(stage)
+    from core.ground_friction import apply_scene_ground_friction
+    apply_scene_ground_friction(stage, prim_path)
     _record_custom_scene_bounds(stage, prim_path)
     if num_planes == 0:
         print("[WARN] Warehouse GroundPlane not found during spawn — check USD prim path")
@@ -1326,129 +1103,17 @@ def _spawn_warehouse_usd(prim_path: str, cfg, translation=None, orientation=None
     return prim
 
 
-def _has_direct_semantic_annotation(prim) -> bool:
-    return any("semanticData" in attr.GetName() for attr in prim.GetAttributes())
+_has_direct_semantic_annotation = hospital_scene._has_direct_semantic_annotation
 
+_reconcile_navigation_semantics = hospital_scene._reconcile_navigation_semantics
 
-def _reconcile_navigation_semantics(stage, root_path: str) -> int:
-    """Repair stale structural/walkable labels using leaf-first prim names."""
-    if os.environ.get("SEMANTIC_LABEL_MODE", "").strip() == "manual_labeled":
-        return 0
-    root = stage.GetPrimAtPath(root_path)
-    if not root or not root.IsValid():
-        return 0
-    repaired = 0
-    walkable = {"floor", "ramp", "stairs"}
-    for prim in Usd.PrimRange(root):
-        path = str(prim.GetPath())
-        expected = direct_door_semantic_class(path)
-        if expected is None:
-            expected = direct_railing_semantic_class(path)
-        if expected is None:
-            expected = direct_navigation_semantic_class(path)
-        if expected is None:
-            continue
-        # Never restore a broad navigation class on an assembly Xform.  The
-        # navigation overlay deliberately blocks stair-root semantics so the
-        # rendered child meshes can distinguish tread from railing.  Rewriting
-        # ``Geo_M_Stairs*`` here made Replicator classify the whole assembly as
-        # stairs and overrode the child wall label at runtime.
-        if not prim.IsA(UsdGeom.Gprim):
-            continue
-        updated = False
-        for attribute in prim.GetAttributes():
-            if "semanticData" in attribute.GetName():
-                current = canonical_semantic_class(str(attribute.Get() or ""))
-                if (current in walkable) != (expected in walkable):
-                    attribute.Set(expected)
-                    updated = True
-        if updated:
-            repaired += 1
-    return repaired
+_count_semantic_annotations = hospital_scene._count_semantic_annotations
 
+_count_stair_obstacle_labels = hospital_scene._count_stair_obstacle_labels
 
-def _count_semantic_annotations(stage, root_path: str) -> int:
-    root = stage.GetPrimAtPath(root_path)
-    if not root or not root.IsValid():
-        return 0
-    return sum(
-        1
-        for prim in Usd.PrimRange(root)
-        if _has_direct_semantic_annotation(prim)
-    )
+_label_named_navigation_geometry = hospital_scene._label_named_navigation_geometry
 
-
-def _count_stair_obstacle_labels(stage, root_path: str) -> int:
-    """Count direct obstacle labels authored inside named stair assemblies."""
-    root = stage.GetPrimAtPath(root_path)
-    if not root or not root.IsValid():
-        return 0
-    count = 0
-    for prim in Usd.PrimRange(root):
-        if "stair" not in str(prim.GetPath()).lower():
-            continue
-        for attribute in prim.GetAttributes():
-            if "semanticdata" not in attribute.GetName().lower():
-                continue
-            if canonical_semantic_class(attribute.Get()) == "wall":
-                count += 1
-                break
-    return count
-
-
-def _label_named_navigation_geometry(stage, root_path: str) -> dict[str, int]:
-    """Author direct labels on renderable floor and transition prims.
-
-    The hospital asset has structural labels on broad ancestor prims.  A mesh
-    named ``Geo_Floor_*`` can therefore inherit ``structure`` even though name
-    inference correctly identifies it as a floor.  Reconciliation alone does
-    not fix that case because it only edits semantic attributes already
-    authored on the mesh.  Replicator resolves the rendered leaf prim, so put
-    the navigation label directly on each renderable leaf before annotators
-    are created.
-    """
-    root = stage.GetPrimAtPath(root_path)
-    if not root or not root.IsValid():
-        return {}
-    counts: dict[str, int] = {}
-    for candidate in Usd.PrimRange(root):
-        if not candidate.IsActive():
-            continue
-        if not candidate.IsA(UsdGeom.Gprim):
-            continue
-        if os.environ.get("SEMANTIC_LABEL_MODE", "").strip() == "manual_labeled":
-            # Count authored surfaces without rewriting audited source labels.
-            # S_WetFloorSign used to be overwritten as floor here after load.
-            value = candidate.GetAttribute("semantic:Semantics:params:semanticData").Get()
-            if value in {"floor", "stairs", "ramp"}:
-                counts[value] = counts.get(value, 0) + 1
-            continue
-        class_name = direct_navigation_semantic_class(str(candidate.GetPath()))
-        if class_name is None:
-            continue
-        if _set_semantic_class(candidate, class_name):
-            counts[class_name] = counts.get(class_name, 0) + 1
-    return counts
-
-
-def _label_named_railing_geometry(stage, root_path: str) -> dict[str, int]:
-    """Directly label rail/fence leaves so stair-parent labels cannot leak."""
-    root = stage.GetPrimAtPath(root_path)
-    if not root or not root.IsValid():
-        return {}
-    counts: dict[str, int] = {}
-    for candidate in Usd.PrimRange(root):
-        if not candidate.IsActive():
-            continue
-        if not candidate.IsA(UsdGeom.Gprim):
-            continue
-        class_name = direct_railing_semantic_class(str(candidate.GetPath()))
-        if class_name is None:
-            continue
-        if _set_semantic_class(candidate, class_name):
-            counts[class_name] = counts.get(class_name, 0) + 1
-    return counts
-
+_label_named_railing_geometry = hospital_scene._label_named_railing_geometry
 
 def _label_unannotated_geometry(stage, root_path: str, profile_hint: str) -> dict[str, int]:
     """Attach inferred class labels to every unlabeled renderable USD prim."""
@@ -1484,6 +1149,7 @@ def _spawn_generic_usd(prim_path: str, cfg, translation=None, orientation=None):
 
     stage = omni.usd.get_context().get_stage()
     label_mode = os.environ.get("SEMANTIC_LABEL_MODE", "").strip()
+    from core.ground_friction import apply_scene_ground_friction
     if label_mode == "manual_labeled":
         annotation_count = _count_semantic_annotations(stage, prim_path)
         if annotation_count == 0:
@@ -1491,6 +1157,7 @@ def _spawn_generic_usd(prim_path: str, cfg, translation=None, orientation=None):
                 f"Manual-labeled USD has no semantic annotations: {cfg.usd_path}"
             )
         _record_custom_scene_bounds(stage, prim_path)
+        apply_scene_ground_friction(stage, prim_path)
         _SPATIAL_MAP_METADATA = {"semantic_annotation_count": annotation_count}
         print(
             f"[INFO] Manual-labeled custom USD spawned at {prim_path}: "
@@ -1510,6 +1177,7 @@ def _spawn_generic_usd(prim_path: str, cfg, translation=None, orientation=None):
     if sum(counts.values()) == 0:
         raise RuntimeError(f"No renderable geometry was labeled under {prim_path}: {cfg.usd_path}")
     _record_custom_scene_bounds(stage, prim_path)
+    apply_scene_ground_friction(stage, prim_path)
     _SPATIAL_MAP_METADATA = {"semantic_counts": counts}
     summary = ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
     print(f"[INFO] Generic custom USD labeled before sensor startup: {summary}")
@@ -1732,104 +1400,14 @@ def _spawn_procedural_layout(prim_path: str, cfg, translation=None, orientation=
     return stage.GetPrimAtPath(prim_path)
 
 
-def _set_semantic_class(prim, class_name: str) -> bool:
-    """Attach one unambiguous Replicator class label to a prim."""
-    if not prim or not prim.IsValid():
-        return False
-    # Use the same canonical API instance as the statically labeled assets.
-    # Creating class_floor/class_stairs beside an existing ``Semantics`` API
-    # gives Replicator multiple class values for one rendered prim and the ROS
-    # bridge can publish that conflict as background.
-    semantics = Semantics.SemanticsAPI.Apply(prim, "Semantics")
-    semantics.CreateSemanticTypeAttr().Set("class")
-    semantics.CreateSemanticDataAttr().Set(class_name)
-    return True
+_set_semantic_class = hospital_scene._set_semantic_class
 
-
-def _label_ground_subtree(stage, root_path: str, class_name: str) -> int:
-    """Apply a semantic class to every renderable prim under root_path.
-
-    Generated terrains put the actual mesh on child prims (e.g.
-    /World/ground/flat); the root prim itself is only an Xform.  Replicator
-    semantics are per-prim, so labelling just the root leaves the rendered
-    floor unlabeled (it then merges with structure/background, which makes
-    flat scenes look permanently "blocked" to semantic-band avoidance).
-    """
-    root = stage.GetPrimAtPath(root_path)
-    if not root or not root.IsValid():
-        print(f"[WARN] Cannot label ground: {root_path} missing")
-        return 0
-    count = 0
-    for prim in Usd.PrimRange(root):
-        if not prim.IsActive():
-            continue
-        if not (prim.IsA(UsdGeom.Gprim) or prim.IsA(UsdGeom.Mesh)):
-            continue
-        if _set_semantic_class(prim, class_name):
-            count += 1
-    if count:
-        print(f"[INFO] Semantic class applied: {root_path}/** -> {class_name} ({count} prims)")
-    return count
-
+_label_ground_subtree = hospital_scene._label_ground_subtree
 
 def _configure_default_ground_for_custom_usd(stage) -> bool:
-    """Hide the fallback terrain when the imported USD provides its own floor.
-
-    The plane remains active for conservative foot-contact support, while USD
-    visibility inheritance removes it from RGB, depth, and semantic rendering.
-    """
-    global _SPATIAL_MAP_METADATA
-
-    if os.environ.get("HIDE_DEFAULT_GROUND", "false").lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
-        return False
-    ground = stage.GetPrimAtPath("/World/ground")
-    if not ground or not ground.IsValid():
-        raise RuntimeError("HIDE_DEFAULT_GROUND=true but /World/ground is missing")
-    if not _CUSTOM_FLOOR_BOUNDS:
-        raise RuntimeError(
-            "Refusing to hide /World/ground: the custom USD exposes no floor meshes"
-        )
-    imageables = []
-    for prim in Usd.PrimRange(ground):
-        imageable = UsdGeom.Imageable(prim)
-        if not imageable:
-            continue
-        imageables.append((prim, imageable))
-    if not imageables:
-        raise RuntimeError(
-            "HIDE_DEFAULT_GROUND=true but /World/ground has no imageable prims"
-        )
-
-    # Author visibility on the root and concrete descendants. Root visibility
-    # is normally sufficient through inheritance, while descendant opinions
-    # make the invariant robust to imported terrain assets with local values.
-    for _, imageable in imageables:
-        imageable.MakeInvisible()
-
-    still_visible = [
-        str(prim.GetPath())
-        for prim, imageable in imageables
-        if imageable.ComputeVisibility() != UsdGeom.Tokens.invisible
-    ]
-    if still_visible:
-        raise RuntimeError(
-            "Default ground is still sensor-visible after hiding: "
-            + ", ".join(still_visible[:8])
-        )
-    print(
-        f"[INFO] Default /World/ground hidden from sensors "
-        f"({len(imageables)} imageable prims verified invisible); "
-        f"the custom USD supplies {len(_CUSTOM_FLOOR_BOUNDS)} rendered floor meshes"
+    return hospital_scene.configure_default_ground(
+        stage, _CUSTOM_FLOOR_BOUNDS, _SPATIAL_MAP_METADATA,
     )
-    _SPATIAL_MAP_METADATA["default_ground_sensor_visibility"] = "invisible"
-    _SPATIAL_MAP_METADATA["custom_floor_mesh_count"] = len(_CUSTOM_FLOOR_BOUNDS)
-    return True
-
 
 def _apply_procedural_terrain_from_env(env_cfg) -> None:
     global _CUSTOM_SCENE_BOUNDS, _CUSTOM_SCENE_PRIM_PATH, _VALID_SPAWN_POINTS
@@ -1874,7 +1452,8 @@ def _apply_procedural_terrain_from_env(env_cfg) -> None:
         debug_vis=False,
     )
     env_cfg.sim.physics_material = env_cfg.scene.terrain.physics_material
-    env_cfg.scene.height_scanner.mesh_prim_paths = ["/World/ground"]
+    if env_cfg.scene.height_scanner is not None:
+        env_cfg.scene.height_scanner.mesh_prim_paths = ["/World/ground"]
     if kind == "flat":
         # The generated tile is 10x10 m. Keep one metre of stopping margin so
         # a goal-conditioned controller cannot walk off its finite edge.
@@ -1892,11 +1471,31 @@ def _apply_procedural_terrain_from_env(env_cfg) -> None:
     print(f"[INFO] Procedural terrain enabled: {kind}")
 
 
+NAVIGATION_SPEED_CONSTRAINTS = {}
+
+
+def navigation_constraints_cb(msg, num_robot):
+    try:
+        import json
+        data = json.loads(msg.data)
+        if (math.isfinite(data['timestamp']) and math.isfinite(data['navigation_limit'])
+                and data['navigation_limit'] >= 0):
+            NAVIGATION_SPEED_CONSTRAINTS[str(num_robot)] = data
+    except (ValueError, TypeError, KeyError):
+        pass  # invalid/missing constraint expires to a protective stop
+
+
 def cmd_vel_cb(msg, num_robot):
     x = msg.linear.x
     y = msg.linear.y
     z = msg.angular.z
+    if not all(math.isfinite(value) for value in (x, y, z)):
+        return
     custom_rl_env.base_command[str(num_robot)] = [x, y, z]
+    custom_rl_env.command_received_at[str(num_robot)] = (
+        omni.timeline.get_timeline_interface().get_current_time()
+        if args_cli.robot == 'b2w' else time.monotonic()
+    )
 
 
 def _request_episode_reset(_request, response):
@@ -1924,11 +1523,14 @@ def _request_episode_reset(_request, response):
 
 
 def add_cmd_sub(num_envs):
+    from std_msgs.msg import String
     node_test = rclpy.create_node("position_velocity_publisher")
     for i in range(num_envs):
         node_test.create_subscription(
-            Twist, f"robot{i}/cmd_vel", lambda msg, i=i: cmd_vel_cb(msg, str(i)), 10
+            Twist, f"{robot_namespace(i)}/cmd_vel", lambda msg, i=i: cmd_vel_cb(msg, str(i)), 10
         )
+        node_test.create_subscription(String, f'{robot_namespace(i)}/navigation_speed_constraints',
+            lambda msg, i=i: navigation_constraints_cb(msg, str(i)), 10)
         # Reset services are registered after the first successful simulation
         # step. Command subscription alone does not imply RTX/physics readiness.
     # Spin in a separate thread
@@ -1995,6 +1597,32 @@ def _apply_random_start_from_env(env_cfg) -> None:
         print(f"[INFO] Random start pose_range enabled: {pose_range}")
 
 
+def _log_robot_velocities(env, requested_commands, applied_commands, terrain_results):
+    """Report measured body velocity and raw requested command in physical units."""
+    robot = env.unwrapped.scene['robot']
+    linear = robot.data.root_lin_vel_b.tolist()
+    angular = robot.data.root_ang_vel_b.tolist()
+    for i, (velocity, omega) in enumerate(zip(linear, angular)):
+        requested = requested_commands[i]
+        applied = applied_commands[i]
+        result = terrain_results[i] if terrain_results else None
+        vx, vy = velocity[:2]
+        print(
+            f'[velocity robot{i}] t={env.unwrapped.sim.current_time:.3f} body frame '
+            f'request=({requested[0]:+.3f}, {requested[1]:+.3f}, {requested[2]:+.3f}) '
+            f'limited=({applied[0]:+.3f}, {applied[1]:+.3f}, {applied[2]:+.3f}) '
+            f'actual(vx,vy,wz)=({vx:+.3f}, {vy:+.3f}, {omega[2]:+.3f}) '
+            f'speed_xy={math.hypot(vx, vy):.3f} m/s '
+            + (f'terrain={result.state} cap={result.speed_limit:.3f} stairs_distance={result.distance_to_stairs:.3f} '
+               f'brake_distance={result.brake_distance:.3f} reason={result.reason} ' if result else '') +
+            (f'pos={tuple(round(v,3) for v in result.diagnostics["position"])} '
+             f'hazard_distance={result.diagnostics["hazard_distance"]:.3f} '
+             f'emergency={result.diagnostics["emergency"]} ' if result and getattr(result,'diagnostics',None) else '') +
+            f'[vx,vy: m/s; wz: rad/s]',
+            flush=True,
+        )
+
+
 def run_sim():
     global _EPISODE_RESET_ERROR
     if args_cli.cmd_source == "keyboard":
@@ -2006,52 +1634,50 @@ def run_sim():
         _input.subscribe_to_keyboard_events(_keyboard, sub_keyboard_event)
 
     """Run deploy-time inference with an RSL-RL checkpoint."""
-    # ── Resolve agent cfg and checkpoint path FIRST ───────────────────────────
-    # The checkpoint dimensions determine which MoE-CTS observation layout is used.
-    agent_cfg: RslRlOnPolicyRunnerCfg = resolve_agent_cfg(unitree_go2_agent_cfg)
-    if args_cli.robot != "go2":
-        raise ValueError("MoE-CTS deployment supports only the Go2 robot")
+    from core.lab_policy import load_deployment_config
+    from configs.lab_deploy import Go2LabDeployCfg
+    from core.terrain_speed import TerrainSpeedConfig
 
-    log_root_path = os.path.abspath(
-        os.path.join("logs", "rsl_rl", agent_cfg["experiment_name"]))
-    print(f"[INFO] Loading experiment from directory: {log_root_path}")
-    resume_path = resolve_checkpoint_path(
-        log_root_path, agent_cfg["load_run"], agent_cfg["load_checkpoint"])
-    configure_policy_from_checkpoint(agent_cfg, resume_path)
-    print(
-        "[INFO] Resolved MoE-CTS agent config: "
-        f"experiment={agent_cfg['experiment_name']}, "
-        f"checkpoint={agent_cfg['load_checkpoint']}, "
-        f"noise_std_type={agent_cfg['policy'].get('noise_std_type', 'default')}"
-    )
+    def repo_path(value):
+        path = Path(value).expanduser()
+        return path if path.is_absolute() else REPO_ROOT / path
 
-    # ── Choose env cfg to match the checkpoint's observation space ────────────
-    _cts_dims = _infer_cts_checkpoint_dims(resume_path)
-    actor_obs_dim = _cts_dims["num_actor_obs"]
-    if actor_obs_dim == 45:
-        env_cfg = Go2StairDeployCfg()
-        print("[INFO] MoE-CTS checkpoint detected — using Go2StairDeployCfg (45D student obs)")
-    elif actor_obs_dim == 48:
-        env_cfg = Go2FullSceneDeployCfg()
-        print("[INFO] MoE-CTS checkpoint detected — using Go2FullSceneDeployCfg (48D velocity-aware student obs)")
+    resume_path = str(repo_path(args_cli.policy_path))
+    lab_deployment = None
+    if args_cli.robot == 'go2':
+        lab_deployment = load_deployment_config(repo_path(args_cli.policy_config))
+    terrain_config = TerrainSpeedConfig.load(repo_path(args_cli.terrain_speed_config)) if args_cli.terrain_speed_limit else None
+    if terrain_config is not None and os.environ.get('NAV_SPEED_CONSTRAINTS', '0') == '1':
+        from dataclasses import replace
+        terrain_config = replace(terrain_config, navigation_constraints_enabled=True)
+    terrain_enabled = terrain_config is not None and terrain_config.enabled
+    if os.environ.get('NAV_SPEED_CONSTRAINTS','0') == '1' and not terrain_enabled:
+        raise RuntimeError('NAV_SPEED_CONSTRAINTS requires enabled terrain speed limiting; refusing to bypass navigation constraints')
+    command_limits = args_cli.max_velocity_command
+    if terrain_enabled and command_limits is None:
+        command_limits = (terrain_config.flat_max_vx, terrain_config.flat_max_vy, terrain_config.max_yaw_rate)
+    if args_cli.robot == 'b2w':
+        from configs.b2w_deploy import B2WDeployCfg
+        env_cfg = B2WDeployCfg()
+        if command_limits is not None:
+            raise ValueError('B2W command limits are defined by its locomotion profile')
     else:
-        raise RuntimeError(
-            f"Unsupported MoE-CTS actor observation size {actor_obs_dim}. "
-            "Add a matching deploy environment configuration first."
-        )
+        env_cfg = Go2LabDeployCfg()
+        env_cfg.configure(lab_deployment, command_limits)
+    print(f'[ground friction] default terrain static={env_cfg.scene.terrain.physics_material.static_friction:g} '
+          f'dynamic={env_cfg.scene.terrain.physics_material.dynamic_friction:g}')
+    actor_obs_dim = 60 if args_cli.robot == 'b2w' else 45
+    print(f'[INFO] Robot={args_cli.robot}, locomotion policy={resume_path}, terrain_speed={terrain_enabled}')
+    print('[INFO] B2W locomotion: 60D state, 16D joint/wheel action' if args_cli.robot == 'b2w'
+          else '[INFO] Lab TorchScript student: 45D, internal 10-frame term-wise history')
 
     _apply_procedural_terrain_from_env(env_cfg)
     _apply_random_start_from_env(env_cfg)
 
-    global CMD_LIN_VEL, CMD_ANG_VEL
-    if actor_obs_dim == 45:
-        CMD_LIN_VEL = 1.0
-        CMD_ANG_VEL = 1.5
-    else:
-        CMD_LIN_VEL = 1.0
-        CMD_ANG_VEL = 1.0
+    global CMD_LIN_VEL, CMD_ANG_VEL, CMD_SIDE_VEL
+    CMD_LIN_VEL, CMD_SIDE_VEL, CMD_ANG_VEL = env_cfg.lab_command_limits
     print(
-        f"[INFO] {actor_obs_dim}D MoE-CTS command limits enabled: "
+        f"[INFO] {actor_obs_dim}D locomotion command limits enabled: "
         f"lin={CMD_LIN_VEL:.1f} m/s, yaw={CMD_ANG_VEL:.1f} rad/s"
     )
 
@@ -2085,12 +1711,8 @@ def run_sim():
         if requested_hospital != expected_hospital or not expected_hospital.is_file():
             raise RuntimeError(f"Hospital must use labeled asset: {expected_hospital}")
         HOSPITAL_USD = str(expected_hospital)
-        hospital_spawn_cfg = sim_utils.UsdFileCfg(usd_path=HOSPITAL_USD)
-        hospital_spawn_cfg.func = _spawn_hospital_usd
-        env_cfg.scene.custom_env = AssetBaseCfg(
-            prim_path="/World/hospital",
-            spawn=hospital_spawn_cfg,
-        )
+        hospital_scene.configure_hospital_scene(env_cfg.scene, HOSPITAL_USD, _spawn_hospital_usd)
+        env_cfg.sim.physics_material = env_cfg.scene.terrain.physics_material
 
     # Reuse the hospital loading path for warehouse: registering the USD as an
     # AssetBaseCfg makes IsaacLab compose the scene together with the robot.
@@ -2145,13 +1767,27 @@ def run_sim():
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env)
     robot = env.unwrapped.scene["robot"]
-    ordered_ids, ordered_names = robot.find_joints(GO2_MODEL_JOINT_NAMES, preserve_order=True)
-    print(f"[INFO] Go2 asset joint order: {robot.joint_names}")
-    print(f"[INFO] Go2 deploy joint order: {ordered_names} {ordered_ids}")
+    if args_cli.robot == 'go2':
+        ordered_ids, ordered_names = robot.find_joints(GO2_MODEL_JOINT_NAMES, preserve_order=True)
+        print(f"[INFO] Go2 deploy joint order: {ordered_names} {ordered_ids}")
+    print(f"[INFO] {args_cli.robot} asset joint order: {robot.joint_names}")
 
     # ── Load policy ───────────────────────────────────────────────────────────
-    _device = agent_cfg["device"]
-    policy = load_cts_policy(resume_path, env, _device)
+    from core.lab_policy import LabStudentPolicy
+    if args_cli.robot == 'b2w':
+        from core.b2w_policy import B2WLocomotionPolicy
+        policy = B2WLocomotionPolicy(resume_path, env.num_envs, env.device)
+    else:
+        policy = LabStudentPolicy(resume_path, env.num_envs, env.device, lab_deployment)
+    terrain_adapter = None
+    env.unwrapped.navigation_speed_constraints = NAVIGATION_SPEED_CONSTRAINTS
+    if terrain_enabled:
+        from core.terrain_runtime import TerrainCommandAdapter
+        # Include every active static collision source, including the existing
+        # fallback plane even when hidden from rendering. Robots are excluded by the index.
+        terrain_adapter = TerrainCommandAdapter(env.unwrapped, semantic_stage, ['/World'], terrain_config, log_enabled=False,
+            ros_time_provider=omni.timeline.get_timeline_interface().get_current_time)
+        env.unwrapped.terrain_command_adapter = terrain_adapter
     print(f"[INFO]: Loading model checkpoint from: {resume_path}")
 
     # initialize ROS2 node
@@ -2161,20 +1797,28 @@ def run_sim():
     cmd_spin_thread = None
     if args_cli.cmd_source == "ros2":
         cmd_node, cmd_spin_thread = add_cmd_sub(env_cfg.scene.num_envs)
-        print("[INFO] Command source: ROS2 (/robot{i}/cmd_vel -> base_command)")
+        print(f"[INFO] Command source: ROS2 (/{robot_namespace(0)}/cmd_vel -> locomotion)")
     else:
         print("[INFO] Command source: keyboard (W/S/A/D/Q/E)")
 
     # Attach sensors and create render products AFTER the full scene
     # (including custom env) is on stage, but before the first obs step.
-    UnitreeL1_annotator_lst = add_rtx_lidar(env_cfg.scene.num_envs, args_cli.robot, "UnitreeL1", False)
-    ExtraLidar_annotator_lst = add_rtx_lidar(env_cfg.scene.num_envs, args_cli.robot, "Extra", False)
-    annotator_lst = UnitreeL1_annotator_lst + ExtraLidar_annotator_lst
-    add_camera(env_cfg.scene.num_envs)
+    annotator_lst = []
+    if args_cli.robot == 'go2':
+        UnitreeL1_annotator_lst = add_rtx_lidar(env_cfg.scene.num_envs, args_cli.robot, "UnitreeL1", False)
+        ExtraLidar_annotator_lst = add_rtx_lidar(env_cfg.scene.num_envs, args_cli.robot, "Extra", False)
+        annotator_lst = UnitreeL1_annotator_lst + ExtraLidar_annotator_lst
+        add_camera(env_cfg.scene.num_envs)
+    else:
+        from core.b2w_rgb_camera import add_b2w_rgb_cameras
+        add_b2w_rgb_cameras(env.unwrapped.scene, env_cfg.scene.raycast_camera)
+        from core.b2w_follow_camera import add_b2w_follow_cameras
+        add_b2w_follow_cameras(env.unwrapped.scene)
 
     # create ros2 camera stream omnigraph (rgb + depth + semantic_segmentation)
     for i in range(env_cfg.scene.num_envs):
-        create_front_cam_omnigraph(i)
+        if args_cli.robot == 'go2':
+            create_front_cam_omnigraph(i)
 
     # First observation collection — triggers the first policy-driven step.
     # Everything above must be fully on stage before this call.
@@ -2201,6 +1845,7 @@ def run_sim():
     _dbg_step = 0
     _dbg_resets = 0
     _dbg_timeouts = 0
+    _next_velocity_log_at = time.monotonic()
     shutdown_requested = threading.Event()
 
     def _request_orderly_shutdown(signum, _frame):
@@ -2224,7 +1869,10 @@ def run_sim():
                 try:
                     for robot_index in range(env_cfg.scene.num_envs):
                         custom_rl_env.base_command[str(robot_index)] = [0, 0, 0]
+                    if terrain_adapter is not None:
+                        terrain_adapter.reset()
                     obs, _ = env.reset()
+                    policy.reset()
                     _require_finite_runtime("reset observation", obs)
                     _require_finite_runtime(
                         "reset robot root state",
@@ -2248,8 +1896,12 @@ def run_sim():
             _require_finite_runtime("policy observation", obs)
             actions = policy(obs)
             _require_finite_runtime("policy action", actions)
+            requested_commands = env.unwrapped.lab_requested_command.tolist()
+            applied_commands = env.unwrapped.lab_applied_command.tolist()
+            terrain_results = list(terrain_adapter.results) if terrain_adapter else []
             # env stepping
             obs, _, terminated, extras = env.step(actions)
+            policy.reset(terminated)
             _require_finite_runtime("step observation", obs)
             _require_finite_runtime(
                 "step robot root state",
@@ -2265,6 +1917,9 @@ def run_sim():
                 env,
                 annotator_lst,
                 base_commands=custom_rl_env.base_command,
+                requested_commands=requested_commands,
+                applied_commands=applied_commands,
+                terrain_results=terrain_results,
                 timestamp_seconds=omni.timeline.get_timeline_interface().get_current_time(),
             )
             # --- debug: print early root state so we can distinguish
@@ -2272,9 +1927,17 @@ def run_sim():
             if _dbg_step == 0 and cmd_node is not None:
                 for robot_index in range(env_cfg.scene.num_envs):
                     cmd_node.create_service(
-                        Trigger, f"robot{robot_index}/reset_episode", _request_episode_reset)
+                        Trigger, f"{robot_namespace(robot_index)}/reset_episode", _request_episode_reset)
                 print("[reset] Services ready after first successful simulation step", flush=True)
             _dbg_step += 1
+            if args_cli.velocity_log_interval > 0:
+                now = time.monotonic()
+                if now >= _next_velocity_log_at:
+                    _log_robot_velocities(env, requested_commands, applied_commands, terrain_results)
+                    _next_velocity_log_at = now + args_cli.velocity_log_interval
+            if args_cli.max_steps > 0 and _dbg_step >= args_cli.max_steps:
+                print(f'[INFO] Completed {args_cli.max_steps} finite simulation steps', flush=True)
+                shutdown_requested.set()
             _should_log_dbg = (
                 (_dbg_step <= 5)
                 or (_dbg_step <= 50 and _dbg_step % 10 == 0)
@@ -2327,6 +1990,8 @@ def run_sim():
 
     # Keep ROS alive while the environment tears down its Replicator writers;
     # shutting rclpy down first makes OmniGraph abort while publishing cameras.
+    if terrain_adapter is not None:
+        terrain_adapter.close()
     env.close()
     for node in (cmd_node, base_node):
         if node is not None:

@@ -27,12 +27,16 @@ import numpy as np
 
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
-from sensor_msgs.msg import JointState
-from geometry_msgs.msg import TransformStamped, Twist, Vector3, Quaternion
+from sensor_msgs.msg import JointState, Image, CameraInfo
+from core.robot_profiles import robot_namespace, robot_type, b2w_camera_pose
+from geometry_msgs.msg import TransformStamped, Twist, TwistStamped, Vector3, Quaternion
 from tf2_ros import StaticTransformBroadcaster, TransformBroadcaster
 from go2_interfaces.msg import Go2State
-from std_msgs.msg import Header
+from std_msgs.msg import Header, String
+import json
+import math
 from builtin_interfaces.msg import Time
+from rosgraph_msgs.msg import Clock
 
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, PointField, Imu
@@ -93,7 +97,7 @@ def add_rtx_lidar(num_envs, robot_type, lidar_type, debug=False):
             writer.attach([lidar_texture])
 
         # writer = rep.writers.get("RtxLidar" + "ROS2PublishPointCloud")
-        # writer.initialize(topicName=f"robot{i}/point_cloud2", frameId=f"robot{i}/base_link")
+        # writer.initialize(topicName=f"{robot_namespace(i)}/point_cloud2", frameId=f"{robot_namespace(i)}/base_link")
         # writer.attach([lidar_texture])
 
         annotator = rep.AnnotatorRegistry.get_annotator("RtxSensorCpuIsaacCreateRTXLidarScanBuffer")
@@ -132,70 +136,7 @@ def attach_usd_to_sensor(sensor_path: str, usd_path: str, visible=True):
         prim = stage.GetPrimAtPath(path)
         prim.GetAttribute("visibility").Set("inherited")
 
-DEFAULT_FRONT_CAM_EXTRINSIC = np.asarray(
-    [
-        [0.0, 0.0, 1.0, 0.32487],
-        [-1.0, 0.0, 0.0, -0.00095],
-        [0.0, -1.0, 0.0, 0.05362],
-        [0.0, 0.0, 0.0, 1.0],
-    ],
-    dtype=np.float64,
-)
-
-
-def _rotation_matrix_to_quaternion_wxyz(rotation: np.ndarray) -> tuple[float, ...]:
-    """Convert a proper 3×3 rotation matrix to a normalized wxyz quaternion."""
-    matrix = np.asarray(rotation, dtype=np.float64)
-    trace = float(np.trace(matrix))
-    if trace > 0.0:
-        scale = 2.0 * np.sqrt(trace + 1.0)
-        w = 0.25 * scale
-        x = (matrix[2, 1] - matrix[1, 2]) / scale
-        y = (matrix[0, 2] - matrix[2, 0]) / scale
-        z = (matrix[1, 0] - matrix[0, 1]) / scale
-    else:
-        index = int(np.argmax(np.diag(matrix)))
-        if index == 0:
-            scale = 2.0 * np.sqrt(1.0 + matrix[0, 0] - matrix[1, 1] - matrix[2, 2])
-            w = (matrix[2, 1] - matrix[1, 2]) / scale
-            x = 0.25 * scale
-            y = (matrix[0, 1] + matrix[1, 0]) / scale
-            z = (matrix[0, 2] + matrix[2, 0]) / scale
-        elif index == 1:
-            scale = 2.0 * np.sqrt(1.0 + matrix[1, 1] - matrix[0, 0] - matrix[2, 2])
-            w = (matrix[0, 2] - matrix[2, 0]) / scale
-            x = (matrix[0, 1] + matrix[1, 0]) / scale
-            y = 0.25 * scale
-            z = (matrix[1, 2] + matrix[2, 1]) / scale
-        else:
-            scale = 2.0 * np.sqrt(1.0 + matrix[2, 2] - matrix[0, 0] - matrix[1, 1])
-            w = (matrix[1, 0] - matrix[0, 1]) / scale
-            x = (matrix[0, 2] + matrix[2, 0]) / scale
-            y = (matrix[1, 2] + matrix[2, 1]) / scale
-            z = 0.25 * scale
-    quaternion = np.asarray((w, x, y, z), dtype=np.float64)
-    quaternion /= np.linalg.norm(quaternion)
-    if quaternion[0] < 0.0:
-        quaternion *= -1.0
-    return tuple(float(value) for value in quaternion)
-
-
-def front_camera_pose() -> tuple[tuple[float, ...], tuple[float, ...]]:
-    """Return the configured base-to-front-camera translation and quaternion."""
-    raw = os.environ.get("FRONT_CAM_EXTRINSIC", "").replace(",", " ").split()
-    transform = DEFAULT_FRONT_CAM_EXTRINSIC.copy()
-    if raw:
-        if len(raw) != 16:
-            raise ValueError("FRONT_CAM_EXTRINSIC must contain 16 row-major values")
-        transform = np.asarray([float(value) for value in raw], dtype=np.float64).reshape(4, 4)
-    rotation = transform[:3, :3]
-    if not np.allclose(transform[3], (0.0, 0.0, 0.0, 1.0), atol=1e-6):
-        raise ValueError("FRONT_CAM_EXTRINSIC last row must be [0, 0, 0, 1]")
-    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5) or not np.isclose(
-        np.linalg.det(rotation), 1.0, atol=1e-5
-    ):
-        raise ValueError("FRONT_CAM_EXTRINSIC rotation must be orthonormal with det(R)=1")
-    return tuple(transform[:3, 3]), _rotation_matrix_to_quaternion_wxyz(rotation)
+from core.camera_extrinsic import front_camera_pose
 
 
 def add_camera(num_envs):
@@ -243,6 +184,9 @@ def pub_robo_data_ros2(
     annotator_lst,
     base_commands=None,
     timestamp_seconds=None,
+    requested_commands=None,
+    applied_commands=None,
+    terrain_results=None,
 ):
     # Single timestamp for the entire frame so TF and all sensor messages
     # are consistent — prevents RViz2 from extrapolating transforms.
@@ -252,6 +196,11 @@ def pub_robo_data_ros2(
         stamp = Time()
         stamp.sec = int(timestamp_seconds)
         stamp.nanosec = int((float(timestamp_seconds) - stamp.sec) * 1.0e9)
+
+    if robot_type == 'b2w':
+        clock = Clock()
+        clock.clock = stamp
+        base_node.clock_pub.publish(clock)
 
     for i in range(num_envs):
         base_node.publish_joints(
@@ -266,10 +215,25 @@ def pub_robo_data_ros2(
             env.unwrapped.scene["robot"].data.root_lin_vel_b[i],
             i,
             stamp,
+            base_ang_vel_b=env.unwrapped.scene["robot"].data.root_ang_vel_b[i],
         )
         if base_commands is not None:
             cmd = base_commands.get(str(i), [0.0, 0.0, 0.0])
             base_node.publish_cmd(cmd, i, stamp)
+        if requested_commands is not None and applied_commands is not None:
+            base_node.publish_control_commands(requested_commands[i], applied_commands[i], i, stamp)
+        if terrain_results:
+            result = terrain_results[i]
+            details = result.as_dict()
+            details['query_timestamp'] = details.pop('timestamp')
+            details['timestamp'] = stamp.sec+stamp.nanosec*1e-9
+            def clean(value):
+                if isinstance(value, dict): return {k:clean(v) for k,v in value.items()}
+                if isinstance(value,(list,tuple)): return [clean(v) for v in value]
+                if isinstance(value,float) and not math.isfinite(value): return None
+                return value
+            msg=String();msg.data=json.dumps(clean(details))
+            base_node.terrain_diagnostic_pub[i].publish(msg)
         base_node.publish_imu(
             env.unwrapped.scene["robot"].data.root_state_w[i, 3:7],
             env.unwrapped.scene["robot"].data.projected_gravity_b[i, :],
@@ -289,7 +253,12 @@ def pub_robo_data_ros2(
                 i,
             )
 
+        if robot_type == "b2w":
+            base_node.publish_b2w_depth(env.unwrapped.scene["raycast_camera"], i, stamp)
+
         try:
+            if not annotator_lst:
+                continue
             for lidar_id in range(2):
                 index_annotator = (i * 2) + lidar_id
                 base_node.publish_lidar(annotator_lst[index_annotator], i, stamp)
@@ -299,8 +268,10 @@ def pub_robo_data_ros2(
 
 class RobotBaseNode(Node):
     def __init__(self, num_envs):
-        super().__init__("go2_driver_node")
+        super().__init__(f"{robot_type()}_driver_node")
         qos_profile = QoSProfile(depth=10)
+        if robot_type() == 'b2w':
+            self.clock_pub = self.create_publisher(Clock, '/clock', 1)
 
         self.joint_pub = []
         self.go2_state_pub = []
@@ -308,30 +279,48 @@ class RobotBaseNode(Node):
         self.go2_lidar_extra_pub = []
         self.odom_pub = []
         self.imu_pub = []
+        self.requested_command_pub = []
+        self.applied_command_pub = []
+        self.terrain_diagnostic_pub = []
+        self.depth_pub = []
+        self.camera_info_pub = []
+        self.last_depth_time = {}
 
         for i in range(num_envs):
+            if robot_type() == "b2w":
+                self.depth_pub.append(self.create_publisher(Image, f"{robot_namespace(i)}/front_cam/depth", 1))
+                self.camera_info_pub.append(self.create_publisher(CameraInfo, f"{robot_namespace(i)}/front_cam/camera_info", 1))
+            self.terrain_diagnostic_pub.append(self.create_publisher(
+                String, f'{robot_namespace(i)}/velocity_diagnostics', qos_profile))
+            self.requested_command_pub.append(self.create_publisher(
+                TwistStamped, f"{robot_namespace(i)}/requested_command", qos_profile))
+            self.applied_command_pub.append(self.create_publisher(
+                TwistStamped, f"{robot_namespace(i)}/controller_command", qos_profile))
             self.joint_pub.append(
-                self.create_publisher(JointState, f"robot{i}/joint_states", qos_profile)
+                self.create_publisher(JointState, f"{robot_namespace(i)}/joint_states", qos_profile)
             )
-            self.go2_state_pub.append(
-                self.create_publisher(Go2State, f"robot{i}/go2_states", qos_profile)
-            )
+            if robot_type() == 'go2':
+                self.go2_state_pub.append(
+                    self.create_publisher(Go2State, f"{robot_namespace(i)}/go2_states", qos_profile)
+                )
             self.odom_pub.append(
-                self.create_publisher(Odometry, f"robot{i}/odom", qos_profile)
+                self.create_publisher(Odometry, f"{robot_namespace(i)}/odom", qos_profile)
             )
             self.imu_pub.append(
-                self.create_publisher(Imu, f"robot{i}/imu", qos_profile)
+                self.create_publisher(Imu, f"{robot_namespace(i)}/imu", qos_profile)
             )
-            self.go2_lidar_L1_pub.append(
-                self.create_publisher(
-                    PointCloud2, f"robot{i}/point_cloud2_L1", qos_profile
+            if robot_type() == 'go2':
+                self.go2_lidar_L1_pub.append(
+                    self.create_publisher(
+                        PointCloud2, f"{robot_namespace(i)}/point_cloud2_L1", qos_profile
+                    )
                 )
-            )
-            self.go2_lidar_extra_pub.append(
-                self.create_publisher(
-                    PointCloud2, f"robot{i}/point_cloud2_extra", qos_profile
+                self.go2_lidar_extra_pub.append(
+                    self.create_publisher(
+                        PointCloud2, f"{robot_namespace(i)}/point_cloud2_extra", qos_profile
+                    )
                 )
-            )
+
         self.broadcaster = TransformBroadcaster(self, qos=qos_profile)
         self.static_broadcaster = StaticTransformBroadcaster(self)
 
@@ -339,19 +328,19 @@ class RobotBaseNode(Node):
         self.cmd_pub = []
         for i in range(num_envs):
             self.cmd_pub.append(
-                self.create_publisher(Twist, f"robot{i}/base_command", qos_profile)
+                self.create_publisher(Twist, f"{robot_namespace(i)}/base_command", qos_profile)
             )
 
         # Broadcast the same configurable base-to-camera transform used by
         # CameraCfg so rendered data and ROS TF cannot diverge.
-        camera_position, camera_rotation = front_camera_pose()
+        camera_position, camera_rotation = b2w_camera_pose() if robot_type() == "b2w" else front_camera_pose()
         qw, qx, qy, qz = camera_rotation
         static_tfs = []
         for i in range(num_envs):
             cam_tf = TransformStamped()
             cam_tf.header.stamp = self.get_clock().now().to_msg()
-            cam_tf.header.frame_id = f"robot{i}/base_link"
-            cam_tf.child_frame_id = f"robot{i}/front_cam"
+            cam_tf.header.frame_id = f"{robot_namespace(i)}/base_link"
+            cam_tf.child_frame_id = f"{robot_namespace(i)}/front_cam"
             cam_tf.transform.translation.x = camera_position[0]
             cam_tf.transform.translation.y = camera_position[1]
             cam_tf.transform.translation.z = camera_position[2]
@@ -362,13 +351,41 @@ class RobotBaseNode(Node):
             static_tfs.append(cam_tf)
         self.static_broadcaster.sendTransform(static_tfs)
 
+    def publish_b2w_depth(self, camera, index, stamp):
+        now = stamp.sec + stamp.nanosec * 1e-9
+        previous = self.last_depth_time.get(index)
+        if previous is not None and 0 <= now - previous < 0.199:
+            return
+        self.last_depth_time[index] = now
+        depth = camera.data.output["distance_to_image_plane"][index].detach().cpu().numpy().reshape(40, 64)
+        depth = np.ascontiguousarray(depth, dtype='<f4')
+        image = Image()
+        image.header.stamp = stamp
+        image.header.frame_id = f"{robot_namespace(index)}/front_cam"
+        image.height, image.width = depth.shape
+        image.encoding = '32FC1'
+        image.is_bigendian = False
+        image.step = image.width * 4
+        image.data = depth.tobytes()
+        self.depth_pub[index].publish(image)
+        info = CameraInfo()
+        info.header = image.header
+        info.height, info.width = image.height, image.width
+        info.distortion_model = 'plumb_bob'
+        info.d = [0.0]*5
+        fx, fy, cx, cy = 72.7025/3, 72.7025/3, 94.4457/3, 62.5424/3
+        info.k = [fx, 0., cx, 0., fy, cy, 0., 0., 1.]
+        info.r = [1., 0., 0., 0., 1., 0., 0., 0., 1.]
+        info.p = [fx, 0., cx, 0., 0., fy, cy, 0., 0., 0., 1., 0.]
+        self.camera_info_pub[index].publish(info)
+
     def publish_joints(self, joint_names_lst, joint_state_lst, robot_num, stamp):
         joint_state = JointState()
         joint_state.header.stamp = stamp
 
         joint_state_names_formated = []
         for joint_name in joint_names_lst:
-            joint_state_names_formated.append(f"robot{robot_num}/" + joint_name)
+            joint_state_names_formated.append(f"{robot_namespace(robot_num)}/" + joint_name)
 
         joint_state_formated = []
         for joint_state_val in joint_state_lst:
@@ -378,13 +395,13 @@ class RobotBaseNode(Node):
         joint_state.position = joint_state_formated
         self.joint_pub[robot_num].publish(joint_state)
 
-    def publish_odom(self, base_pos, base_rot, base_lin_vel_b, robot_num, stamp):
+    def publish_odom(self, base_pos, base_rot, base_lin_vel_b, robot_num, stamp, base_ang_vel_b=None):
         now = stamp
 
         odom_trans = TransformStamped()
         odom_trans.header.stamp = now
         odom_trans.header.frame_id = "odom"
-        odom_trans.child_frame_id = f"robot{robot_num}/base_link"
+        odom_trans.child_frame_id = f"{robot_namespace(robot_num)}/base_link"
         odom_trans.transform.translation.x = base_pos[0].item()
         odom_trans.transform.translation.y = base_pos[1].item()
         odom_trans.transform.translation.z = base_pos[2].item()
@@ -394,26 +411,26 @@ class RobotBaseNode(Node):
         odom_trans.transform.rotation.w = base_rot[0].item()
         self.broadcaster.sendTransform(odom_trans)
 
-        UnitreeL1_trans = TransformStamped()
-        UnitreeL1_trans.header.stamp = now
-        UnitreeL1_trans.header.frame_id = f"robot{robot_num}/base_link"
-        UnitreeL1_trans.child_frame_id = f"robot{robot_num}/UnitreeL1_link"
-        UnitreeL1_trans.transform.translation = Vector3(x=UnitreeL1_translation[0], y=UnitreeL1_translation[1], z=UnitreeL1_translation[2])
-        UnitreeL1_trans.transform.rotation = Quaternion(x=UnitreeL1_quat[0], y=UnitreeL1_quat[1], z=UnitreeL1_quat[2], w=UnitreeL1_quat[3])
-        self.broadcaster.sendTransform(UnitreeL1_trans)
+        if robot_type() == 'go2':
+            UnitreeL1_trans = TransformStamped()
+            UnitreeL1_trans.header.stamp = now
+            UnitreeL1_trans.header.frame_id = f"{robot_namespace(robot_num)}/base_link"
+            UnitreeL1_trans.child_frame_id = f"{robot_namespace(robot_num)}/UnitreeL1_link"
+            UnitreeL1_trans.transform.translation = Vector3(x=UnitreeL1_translation[0], y=UnitreeL1_translation[1], z=UnitreeL1_translation[2])
+            UnitreeL1_trans.transform.rotation = Quaternion(x=UnitreeL1_quat[0], y=UnitreeL1_quat[1], z=UnitreeL1_quat[2], w=UnitreeL1_quat[3])
+            self.broadcaster.sendTransform(UnitreeL1_trans)
 
-        lidar_trans = TransformStamped()
-        lidar_trans.header.stamp = now
-        lidar_trans.header.frame_id = f"robot{robot_num}/base_link"
-        lidar_trans.child_frame_id = f"robot{robot_num}/lidar_link"
-        lidar_trans.transform.translation = Vector3(x=ExtraLidar_translation[0], y=ExtraLidar_translation[1], z=ExtraLidar_translation[2])
-        lidar_trans.transform.rotation = Quaternion(x=ExtraLidar_quat[0], y=ExtraLidar_quat[1], z=ExtraLidar_quat[2], w=ExtraLidar_quat[3])
-        self.broadcaster.sendTransform(lidar_trans)
-
+            lidar_trans = TransformStamped()
+            lidar_trans.header.stamp = now
+            lidar_trans.header.frame_id = f"{robot_namespace(robot_num)}/base_link"
+            lidar_trans.child_frame_id = f"{robot_namespace(robot_num)}/lidar_link"
+            lidar_trans.transform.translation = Vector3(x=ExtraLidar_translation[0], y=ExtraLidar_translation[1], z=ExtraLidar_translation[2])
+            lidar_trans.transform.rotation = Quaternion(x=ExtraLidar_quat[0], y=ExtraLidar_quat[1], z=ExtraLidar_quat[2], w=ExtraLidar_quat[3])
+            self.broadcaster.sendTransform(lidar_trans)
         odom_topic = Odometry()
         odom_topic.header.stamp = now
         odom_topic.header.frame_id = "odom"
-        odom_topic.child_frame_id = f"robot{robot_num}/base_link"
+        odom_topic.child_frame_id = f"{robot_namespace(robot_num)}/base_link"
         odom_topic.pose.pose.position.x = base_pos[0].item()
         odom_topic.pose.pose.position.y = base_pos[1].item()
         odom_topic.pose.pose.position.z = base_pos[2].item()
@@ -425,12 +442,27 @@ class RobotBaseNode(Node):
         odom_topic.twist.twist.linear.x = base_lin_vel_b[0].item()
         odom_topic.twist.twist.linear.y = base_lin_vel_b[1].item()
         odom_topic.twist.twist.linear.z = base_lin_vel_b[2].item()
+        if base_ang_vel_b is not None:
+            odom_topic.twist.twist.angular.x = base_ang_vel_b[0].item()
+            odom_topic.twist.twist.angular.y = base_ang_vel_b[1].item()
+            odom_topic.twist.twist.angular.z = base_ang_vel_b[2].item()
         self.odom_pub[robot_num].publish(odom_topic)
+
+    def publish_control_commands(self, requested, applied, robot_num, stamp):
+        # Stamp with the resulting odometry frame. This command was held over
+        # the just-completed control interval, not read again from the ROS buffer.
+        for command, publisher in ((requested, self.requested_command_pub[robot_num]),
+                                   (applied, self.applied_command_pub[robot_num])):
+            msg = TwistStamped()
+            msg.header.stamp = stamp
+            msg.header.frame_id = f"{robot_namespace(robot_num)}/base_link"
+            msg.twist.linear.x, msg.twist.linear.y, msg.twist.angular.z = map(float, command)
+            publisher.publish(msg)
 
     def publish_imu(self, base_rot, gravity_b, base_ang_vel, robot_num, stamp):
         imu_trans = Imu()
         imu_trans.header.stamp = stamp
-        imu_trans.header.frame_id = f"robot{robot_num}/base_link"
+        imu_trans.header.frame_id = f"{robot_namespace(robot_num)}/base_link"
 
         # projected_gravity_b is the unit gravity vector in body frame (points downward).
         # A real IMU accelerometer measures specific force = a_body - g_body.
@@ -485,12 +517,12 @@ class RobotBaseNode(Node):
             # Publish raw annotator data in the sensor's own frame.
             # TF (base_link → UnitreeL1_link) handles the mounting transform
             # for RViz2; Point-LIO uses extrinsic_T/R in the YAML for SLAM.
-            frame_id       = f"robot{robot_num}/UnitreeL1_link"
+            frame_id       = f"{robot_namespace(robot_num)}/UnitreeL1_link"
             publisher      = self.go2_lidar_L1_pub[robot_num]
             scan_period    = 1.0 / 200.0   # Unitree L1: 200 Hz rotation
             n_scans        = 18            # must match yaml scan_line
         elif data["type"] == "Extra":
-            frame_id       = f"robot{robot_num}/lidar_link"
+            frame_id       = f"{robot_namespace(robot_num)}/lidar_link"
             publisher      = self.go2_lidar_extra_pub[robot_num]
             scan_period    = 1.0 / 200.0
             n_scans        = 18
